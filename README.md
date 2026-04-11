@@ -12,6 +12,40 @@ Read through the [ZMK Module Creation](https://zmk.dev/docs/development/module-c
 
 For more info on modules, you can read through through the [Zephyr modules page](https://docs.zephyrproject.org/3.5.0/develop/modules.html) and [ZMK's page on using modules](https://zmk.dev/docs/features/modules). [Zephyr's west manifest page](https://docs.zephyrproject.org/3.5.0/develop/west/manifest.html#west-manifests) may also be of use.
 
+## Module User Guide
+
+1. Add dependency to your config/west.yml.
+
+    ```yml
+    manifest:
+        remotes:
+            ...
+            - name: cormoran
+            url-base: https://github.com/cormoran
+        projects:
+            ...
+            - name: zmk-module-template
+            remote: cormoran
+            revision: main # or latest commit hash
+            # import: true # if this module has other dependencies
+            ...
+    ```
+
+2. Enable flag in your config/<shield>.conf
+
+    ```conf
+    CONFIG_YOUR_MODULE_NAME=y
+    ```
+
+3. Update your <keyboard>.keymap like .....
+
+    ```
+    / {
+        ...
+    }
+    ```
+
+
 ## Module Development Guide
 
 ### Setup for running test

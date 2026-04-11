@@ -73,16 +73,6 @@ jobs:
             west zephyr-export
       - name: Verify setup
         run: |
-            west zmk-build tests/zmk-config/config -m tests/zmk-config . -n
-      - name: Setup Node.js for Web UI
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-      - name: Install dependencies
-        run: npm ci
-        working-directory: web
-      - name: Generate types from proto
-        run: npm run generate
-        working-directory: web
+            west zmk-build tests/zmk-config -n
       - name: Install pre-commit hooks
         run: pre-commit install
