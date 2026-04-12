@@ -1,6 +1,8 @@
 {
   "name": "ZMK Development",
-  "image": "docker.io/zmkfirmware/zmk-dev-arm:4.1",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
   "containerEnv": {
     "WORKSPACE_DIR": "${containerWorkspaceFolder}",
     "PROMPT_COMMAND": "history -a",

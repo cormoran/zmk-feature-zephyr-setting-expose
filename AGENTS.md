@@ -7,20 +7,21 @@ This repo is created from template. Below template code should be changed when i
 - README.md
   - Remove Summary, "Usage" and "More Info" which is for template users. Replace to proper module description.
   - Update "Module User Guide" properly
-  - Update CI status badge to link to your repo instead of template
+  - Update CI status badge to link to your repo instead of template repo
 - zephyr/module.yml: Change module name properly.
 - rename artifact defined in tests/zmk-config/build.yaml properly
-- remove this "Initialization" section from AGENT.md after confirming all items accomplished.
+- remove this "Initialization" section from AGENT.md (CLAUDE.md is symlink) after confirming all items accomplished.
 
 ## Dev Rules
 
-- Ensure pre-commit works and never bypass pre-commit check.
+- Commit changes at each milestone. Ensure pre-commit works and never bypass pre-commit check.
 - Write simple and sufficient tests for new features.
   - Unit test: Test major functionalities as much as possible by adding case to `tests/<test case>`.
     You might have to add test only logic like executing logic at zephyr initialization to improve test coverage.
   - Build test: Enable feature in `tests/zmk-config/*`. It is to verify build works for real device and to easily test with real device.
     Ensure the feature and device is enabled as expected in the build by verifying output in `test.py`.
 - Update README.md properly to guide how to use the module to unfamiliar ZMK keyboard users. Keep the guide simple but sufficient!
+- Create pull request to origin after finishing the task
 
 ## Commands
 

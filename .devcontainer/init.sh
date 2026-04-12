@@ -13,11 +13,5 @@ else
     echo "* West is already initialized with topdir: $(west topdir)"
 fi
 
-# Install pre-commit if not already installed
-if ! command -v pre-commit &> /dev/null; then
-    echo "* Installing pre-commit..."
-    pip3 install pre-commit --break-system-packages
-fi
-
 git config --global --add safe.directory "$(pwd)"
 pre-commit install || cat /root/.cache/pre-commit/pre-commit.log

@@ -3,12 +3,14 @@
     "symlinkDirectories": ["dependencies", ".west"]
   },
   "permissions": {
-    "deny": ["Bash(*git* push* main*)"]
+    "defaultMode": "acceptEdits",
+    "deny": ["Bash(*git push*main*)", "Bash(*git remote*)"]
   },
   "sandbox": {
     "enabled": true,
+    "autoAllowBashIfSandboxed": true,
     "filesystem": {
-      "allowWrite": ["~/.cmake/", "/workspaces/"],
+      "allowWrite": ["~/.cmake/", "/workspaces/", "."],
       "allowRead": ["/workspaces/"]
     },
     "network": {
@@ -16,13 +18,24 @@
     }
   },
   "hooks": {
+    "PreToolUse": [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "python3 .claude/hooks/restrict_gh.py"
+                }
+            ]
+        }
+    ],
     "Stop": [
       {
         "hooks": [
-          {
-            "type": "agent",
-            "prompt": "Verify README.md is properly updated for module users. $ARGUMENTS"
-          }
+            {
+                "type": "command",
+                "command": "pre-commit run -a",
+                "timeout": 120
+            }
         ]
       }
     ]
