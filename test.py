@@ -49,24 +49,39 @@ class WestCommandsTests(unittest.TestCase):
 
         result = run_west(["zmk-test", "tests", "-m", ".", "-d", str(test_build_dir)])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("PASS: ", result.stdout, result.stdout + result.stderr)
+        self.assertIn("PASS: test", result.stdout, result.stdout + result.stderr)
+        self.assertIn("PASS: studio", result.stdout, result.stdout + result.stderr)
         self.assertNotIn("FAILED: ", result.stdout, result.stdout + result.stderr)
 
     def test_zmk_build(self):
         self._test_zmk_build(
             {
-                "module_template_board": ConfigAndDeviceTree(
+                "module_template_board_feature_disabled": ConfigAndDeviceTree(
                     config=[
-                        # Verify that the config entry is present
                         'CONFIG_ZMK_KEYBOARD_NAME="Module Test"',
                         "CONFIG_ZMK_USB=y",
                         "CONFIG_ZMK_BLE=y",
-                        # Verify that this config entry is not present
-                        NotFound("CONFIG_SHOULD_NOT_EXIST"),
+                        "# CONFIG_ZMK_TEMPLATE_FEATURE is not set",
                     ],
                     device=[
                         "DT_COMPAT_HAS_OKAY_zmk_keymap",
                     ],
+                ),
+                "module_template_board_with_rpc": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_STUDIO=y",
+                        "CONFIG_ZMK_TEMPLATE_FEATURE=y",
+                        "CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y",
+                    ],
+                    device=[],
+                ),
+                "module_template_board_without_rpc": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_TEMPLATE_FEATURE=y",
+                        "# CONFIG_ZMK_STUDIO is not set",
+                        NotFound("CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC"),
+                    ],
+                    device=[],
                 ),
             }
         )
@@ -94,9 +109,10 @@ class WestCommandsTests(unittest.TestCase):
             self._test_strings_in_file(
                 config_path, entries.config, f"{artifact} config"
             )
-            self._test_strings_in_file(
-                device_tree_path, entries.device, f"{artifact} device tree"
-            )
+            if entries.device:
+                self._test_strings_in_file(
+                    device_tree_path, entries.device, f"{artifact} device tree"
+                )
             self.assertTrue(
                 (artifact_dir / "zmk.uf2").exists(),
                 f"{artifact} zmk.uf2 is missing in {artifact_dir}",

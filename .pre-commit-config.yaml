@@ -11,6 +11,36 @@ repos:
       - id: check-added-large-files
       - id: check-merge-conflict
 
+  # Web code: Prettier formatting
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        files: ^web/
+        types_or: [javascript, jsx, ts, tsx, json, css, html]
+        additional_dependencies:
+          - prettier@3.7.4
+
+  # Web code: ESLint
+  - repo: local
+    hooks:
+      - id: eslint
+        name: eslint
+        entry: bash -c 'cd web && npm run lint'
+        language: system
+        files: ^web/.*\.(js|jsx|ts|tsx)$
+        pass_filenames: false
+
+  # Web code: Jest tests
+  - repo: local
+    hooks:
+      - id: jest
+        name: jest tests
+        entry: bash -c 'cd web && npm test'
+        language: system
+        files: ^web/
+        pass_filenames: false
+
   # ZMK module: Python tests
   - repo: local
     hooks:

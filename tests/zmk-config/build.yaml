@@ -1,4 +1,15 @@
 include:
-  - artifact: module_template_board
+  - artifact: module_template_board_feature_disabled
     board: xiao_ble//zmk
     shield: tester_xiao
+
+  - artifact: module_template_board_with_rpc
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_TEMPLATE_FEATURE=y -DCONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
+    snippet: studio-rpc-usb-uart
+
+  - artifact: module_template_board_without_rpc
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    cmake-args: -DCONFIG_ZMK_TEMPLATE_FEATURE=y

@@ -1,13 +1,20 @@
-# cormoran's ZMK Module Template for ZMK
+# cormoran's ZMK Module Template for ZMK (with Custom Studio RPC)
 
 ![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
 [![Test](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml)
 
-This repository contains a template for a ZMK module, as it would most frequently be used.
+This repository contains a template for a ZMK module with Web UI using the **unofficial** custom ZMK Studio RPC protocol.
 
-It's extended from ZMK official template with applying [zmk-west-commands](https://github.com/cormoran/zmk-west-commands), adding test code template and coding agent supports.
+It's extended from ZMK official template with [zmk-west-commands](https://github.com/cormoran/zmk-west-commands), test code template, coding agent support, and custom Studio RPC protocol support.
 
-## Usage
+## Summary
+
+This template includes:
+
+- **Firmware**: Sample custom Studio RPC handler (`src/studio/template_handler.c`)
+- **Protocol**: Protobuf definition (`proto/zmk/template/template.proto`)
+- **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
+- **Tests**: Firmware unit tests (`tests/studio/`) and build tests (`tests/zmk-config/`)
 
 Read through the [ZMK Module Creation](https://zmk.dev/docs/development/module-creation) page for details on how to configure this template.
 
@@ -17,7 +24,7 @@ For more info on modules, you can read through through the [Zephyr modules page]
 
 ## Module User Guide
 
-1. Add dependency to your config/west.yml.
+1. Add dependency to your `config/west.yml`. Note: this module requires a patched ZMK with custom Studio RPC support.
 
    ```yml
    manifest:
@@ -29,24 +36,41 @@ For more info on modules, you can read through through the [Zephyr modules page]
            ...
            - name: zmk-module-template
            remote: cormoran
-           revision: main # or latest commit hash
+           revision: main+custom-studio-protocol # or latest commit hash
            # import: true # if this module has other dependencies
            ...
+           # Required: patched ZMK with custom Studio RPC support
+           - name: zmk
+           remote: cormoran
+           revision: main+custom-studio-protocol
+           import:
+               file: app/west.yml
    ```
 
-2. Enable flag in your config/<shield>.conf
+2. Enable flags in your `config/<shield>.conf`
 
    ```conf
-   CONFIG_YOUR_MODULE_NAME=y
+   CONFIG_ZMK_TEMPLATE_FEATURE=y
+
+   # Optionally enable custom Studio RPC
+   CONFIG_ZMK_STUDIO=y
+   CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
    ```
 
-3. Update your <keyboard>.keymap like .....
+3. Implement your custom protocol by editing:
+   - `proto/zmk/template/template.proto` — message types
+   - `src/studio/template_handler.c` — firmware RPC handler
+   - `web/src/App.tsx` — web UI
 
-   ```
-   / {
-       ...
-   }
-   ```
+### Web UI
+
+See [web/README.md](./web/README.md) for web UI development instructions.
+
+### Publishing Web UI
+
+**GitHub Pages**: Visit `Actions > Test and Build Web UI > Run workflow` to deploy to `https://<account>.github.io/<repo>/`.
+
+**Cloudflare Workers (PR previews)**: Configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets.
 
 ## Module Development Guide
 
@@ -110,7 +134,15 @@ python3 -m unittest
 west zmk-build tests/zmk-config
 # Run unit test directly
 west zmk-test tests -m .
+# Run web tests
+cd web && npm test
 ```
+
+### Sync changes from template
+
+Run `Actions > Sync Changes in Template > Run workflow` to get the latest template changes as a pull request.
+
+If the template contains changes in `.github/workflows/*`, register a GitHub personal access token as `GH_TOKEN` repository secret (`repo` + `workflow` scopes).
 
 ### Coding agent on actions
 

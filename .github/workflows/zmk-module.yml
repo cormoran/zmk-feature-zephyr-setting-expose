@@ -10,9 +10,11 @@ on:
       - .github/workflows/devcontainer.yml
       - .github/workflows/claude.yml
       - .github/workflows/codex.yml
+      - .github/workflows/web-ui.yml
       - .github/actions/zmk-env/**
       - .gitignore
       - .claude/**
+      - "web/**"
   pull_request:
   workflow_dispatch:
   schedule:
