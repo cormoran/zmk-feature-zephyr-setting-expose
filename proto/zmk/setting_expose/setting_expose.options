@@ -1,0 +1,18 @@
+# Nanopb options file for setting_expose.proto
+# Key size: SETTINGS_MAX_NAME_LEN (64) + SETTINGS_EXTRA_LEN (9) + 1 null = 74, rounded to 80
+zmk.setting_expose.SettingEntry.key             max_size:80
+# Value size: SETTINGS_MAX_VAL_LEN = 256
+zmk.setting_expose.SettingEntry.value           max_size:256
+# Use callback for repeated entries to avoid large static buffer
+zmk.setting_expose.ListResponse.entries         type:FT_CALLBACK
+
+zmk.setting_expose.ReadRequest.key              max_size:80
+zmk.setting_expose.ReadResponse.key             max_size:80
+zmk.setting_expose.ReadResponse.value           max_size:256
+
+zmk.setting_expose.WriteRequest.key             max_size:80
+zmk.setting_expose.WriteRequest.value           max_size:256
+
+zmk.setting_expose.DeleteRequest.key            max_size:80
+
+zmk.setting_expose.ErrorResponse.message        max_size:64

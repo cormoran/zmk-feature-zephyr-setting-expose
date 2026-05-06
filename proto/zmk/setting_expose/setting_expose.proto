@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package zmk.setting_expose;
+
+// Type of a setting value, used for display hints in the web UI.
+enum SettingType {
+    BYTES = 0;
+    INT32 = 1;
+    BOOL = 2;
+    STRING = 3;
+}
+
+// A single setting key/value pair with optional type hint.
+message SettingEntry {
+    string key = 1;
+    bytes value = 2;
+    SettingType type = 3;
+}
+
+// List all persisted settings.
+message ListRequest {}
+
+message ListResponse { repeated SettingEntry entries = 1; }
+
+// Read a single setting by key.
+message ReadRequest { string key = 1; }
+
+message ReadResponse {
+    string key = 1;
+    bytes value = 2;
+    SettingType type = 3;
+}
+
+// Write (persist) a setting value.
+message WriteRequest {
+    string key = 1;
+    bytes value = 2;
+}
+
+message WriteResponse {}
+
+// Delete (reset) a setting by key.
+message DeleteRequest { string key = 1; }
+
+message DeleteResponse {}
+
+message ErrorResponse { string message = 1; }
+
+message Request {
+    oneof request_type {
+        ListRequest list = 1;
+        ReadRequest read = 2;
+        WriteRequest write = 3;
+        DeleteRequest delete = 4;
+    }
+}
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        ListResponse list = 2;
+        ReadResponse read = 3;
+        WriteResponse write = 4;
+        DeleteResponse delete = 5;
+    }
+}
