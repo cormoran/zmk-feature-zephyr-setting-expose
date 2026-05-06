@@ -199,14 +199,14 @@ export function SettingsSection() {
   const [editError, setEditError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
-  if (!zmkApp) return null;
-
-  const subsystem = zmkApp.findSubsystem(SUBSYSTEM_IDENTIFIER);
+  const subsystem = zmkApp?.findSubsystem(SUBSYSTEM_IDENTIFIER);
 
   const getService = useCallback(() => {
-    if (!zmkApp.state.connection || !subsystem) return null;
+    if (!zmkApp?.state.connection || !subsystem) return null;
     return new ZMKCustomSubsystem(zmkApp.state.connection, subsystem.index);
   }, [zmkApp, subsystem]);
+
+  if (!zmkApp) return null;
 
   if (!subsystem) {
     return (

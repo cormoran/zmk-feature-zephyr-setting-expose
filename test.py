@@ -61,7 +61,7 @@ class WestCommandsTests(unittest.TestCase):
                         'CONFIG_ZMK_KEYBOARD_NAME="Module Test"',
                         "CONFIG_ZMK_USB=y",
                         "CONFIG_ZMK_BLE=y",
-                        "# CONFIG_ZMK_SETTING_EXPOSE is not set",
+                        NotFound("CONFIG_ZMK_SETTING_EXPOSE=y"),
                     ],
                     device=[
                         "DT_COMPAT_HAS_OKAY_zmk_keymap",

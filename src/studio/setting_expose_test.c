@@ -139,6 +139,28 @@ static const struct zmk_rpc_custom_subsystem *find_subsystem(void) {
     return NULL;
 }
 
+/*
+ * Callback used to decode the payload bytes field out of a CallResponse.
+ * arg must point to a struct call_handler_decode_ctx.
+ */
+struct call_handler_decode_ctx {
+    uint8_t buf[256];
+    size_t len;
+    bool ok;
+};
+
+static bool decode_payload_bytes_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    (void)field;
+    struct call_handler_decode_ctx *ctx = (struct call_handler_decode_ctx *)*arg;
+    ctx->len = stream->bytes_left;
+    if (ctx->len > sizeof(ctx->buf)) {
+        ctx->ok = false;
+        return false;
+    }
+    ctx->ok = pb_read(stream, ctx->buf, ctx->len);
+    return ctx->ok;
+}
+
 static bool call_handler(const struct zmk_rpc_custom_subsystem *sub, const uint8_t *payload,
                          size_t payload_len, zmk_setting_expose_Response *out_resp) {
     zmk_custom_CallRequest req = zmk_custom_CallRequest_init_zero;
@@ -155,15 +177,41 @@ static bool call_handler(const struct zmk_rpc_custom_subsystem *sub, const uint8
         return false;
     }
 
-    uint8_t resp_buf[512];
-    pb_ostream_t out_stream = pb_ostream_from_buffer(resp_buf, sizeof(resp_buf));
+    /*
+     * The encode_response callback is designed to be called by pb_encode as
+     * a bytes callback inside a zmk_custom_CallResponse.  Calling it directly
+     * with a NULL pb_field_t pointer (as was done before) causes a segfault
+     * inside zmk_rpc_custom_subsystem_encode_response_payload because
+     * pb_encode_tag_for_field dereferences the field pointer.
+     *
+     * Instead, wrap the callback in a CallResponse and encode it properly so
+     * that pb_encode passes the real pb_field_t for the `payload` field.
+     */
+    zmk_custom_CallResponse call_resp = zmk_custom_CallResponse_init_zero;
+    call_resp.payload = encode_response;
 
-    if (!encode_response.funcs.encode(&out_stream, NULL, &encode_response.arg)) {
+    uint8_t call_resp_buf[512];
+    pb_ostream_t out_stream = pb_ostream_from_buffer(call_resp_buf, sizeof(call_resp_buf));
+    if (!pb_encode(&out_stream, zmk_custom_CallResponse_fields, &call_resp)) {
+        LOG_ERR("call_handler: failed to encode CallResponse");
         return false;
     }
 
-    pb_istream_t in_stream = pb_istream_from_buffer(resp_buf, out_stream.bytes_written);
-    return pb_decode(&in_stream, zmk_setting_expose_Response_fields, out_resp);
+    /* Decode the payload bytes back out of the CallResponse, then decode
+     * those bytes as a zmk_setting_expose_Response. */
+    struct call_handler_decode_ctx ctx = {0};
+    zmk_custom_CallResponse dec_resp = zmk_custom_CallResponse_init_zero;
+    dec_resp.payload.funcs.decode = decode_payload_bytes_cb;
+    dec_resp.payload.arg = &ctx;
+
+    pb_istream_t in_stream = pb_istream_from_buffer(call_resp_buf, out_stream.bytes_written);
+    if (!pb_decode(&in_stream, zmk_custom_CallResponse_fields, &dec_resp) || !ctx.ok) {
+        LOG_ERR("call_handler: failed to decode CallResponse payload");
+        return false;
+    }
+
+    pb_istream_t resp_stream = pb_istream_from_buffer(ctx.buf, ctx.len);
+    return pb_decode(&resp_stream, zmk_setting_expose_Response_fields, out_resp);
 }
 
 #define RUN_TEST(_name, _expr)                                                                     \
@@ -227,23 +275,20 @@ static bool test_read(const struct zmk_rpc_custom_subsystem *sub) {
 }
 
 static bool test_list_contains_written_key(const struct zmk_rpc_custom_subsystem *sub) {
-    zmk_custom_CallRequest rpc_req = zmk_custom_CallRequest_init_zero;
-
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
     req.which_request_type = zmk_setting_expose_Request_list_tag;
 
-    pb_ostream_t s = pb_ostream_from_buffer(rpc_req.payload.bytes, sizeof(rpc_req.payload.bytes));
+    uint8_t buf[16];
+    pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
     if (!pb_encode(&s, zmk_setting_expose_Request_fields, &req)) {
         return false;
     }
-    rpc_req.payload.size = (pb_size_t)s.bytes_written;
 
-    pb_callback_t encode_response = {0};
-    if (!sub->handler(&rpc_req, &encode_response)) {
+    zmk_setting_expose_Response resp = zmk_setting_expose_Response_init_zero;
+    if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-
-    return encode_response.funcs.encode != NULL;
+    return resp.which_response_type == zmk_setting_expose_Response_list_tag;
 }
 
 static bool test_delete(const struct zmk_rpc_custom_subsystem *sub) {

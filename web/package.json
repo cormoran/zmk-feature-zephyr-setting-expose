@@ -9,9 +9,9 @@
     "lint": "eslint . && prettier --check .",
     "preview": "vite preview",
     "generate": "buf generate",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage",
+    "test": "buf generate && jest",
+    "test:watch": "buf generate && jest --watch",
+    "test:coverage": "buf generate && jest --coverage",
     "format": "prettier --write ."
   },
   "dependencies": {
