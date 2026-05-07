@@ -378,6 +378,12 @@ static int handle_gc_request(const zmk_setting_expose_GcRequest *req,
 /* ---- Clear-all handler -------------------------------------------------- */
 
 #define CLEAR_ALL_BATCH 16
+/*
+ * Maximum number of individual keys to delete in one clear_all call.
+ * This prevents an infinite loop if deletion does not reduce the count
+ * (e.g. a backend that immediately re-populates deleted entries).
+ */
+#define CLEAR_ALL_MAX_ITERATIONS 500
 
 static char _clear_all_keys[CLEAR_ALL_BATCH][80];
 static int _clear_all_count;
@@ -401,7 +407,7 @@ static int handle_clear_all_request(const zmk_setting_expose_ClearAllRequest *re
     (void)req;
 
     /* Iterate in batches to avoid unbounded stack usage. */
-    int safety = 500;
+    int safety = CLEAR_ALL_MAX_ITERATIONS;
     do {
         _clear_all_count = 0;
         settings_load_subtree_direct(NULL, collect_key_cb, NULL);

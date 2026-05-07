@@ -114,6 +114,9 @@ describe("SettingsSection Component", () => {
       return user;
     };
 
+    /** Response used to satisfy the storage info follow-up call without showing the bar */
+    const noStorageInfoPayload = encodeResponse({ storageInfo: {} });
+
     it("should display settings after successful list RPC", async () => {
       const payload = encodeResponse({
         list: {
@@ -281,16 +284,18 @@ describe("SettingsSection Component", () => {
 
       const user = await renderWithMocks();
 
-      // Initial load + storage info (mock both)
+      // Initial load + storage info (bar not shown in this test)
       mocks.call_rpc
         .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } })
-        .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } }) // storage info
+        .mockResolvedValueOnce({
+          custom: { call: { payload: noStorageInfoPayload } },
+        })
         .mockResolvedValueOnce({ custom: { call: { payload: writePayload } } })
         .mockResolvedValueOnce({
           custom: { call: { payload: updatedPayload } },
         })
         .mockResolvedValueOnce({
-          custom: { call: { payload: updatedPayload } },
+          custom: { call: { payload: noStorageInfoPayload } },
         }); // storage info after reload
 
       await user.click(screen.getByRole("button", { name: /Load Settings/i }));
@@ -332,10 +337,14 @@ describe("SettingsSection Component", () => {
 
       mocks.call_rpc
         .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } })
-        .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } }) // storage info
+        .mockResolvedValueOnce({
+          custom: { call: { payload: noStorageInfoPayload } },
+        })
         .mockResolvedValueOnce({ custom: { call: { payload: deletePayload } } })
         .mockResolvedValueOnce({ custom: { call: { payload: emptyPayload } } })
-        .mockResolvedValueOnce({ custom: { call: { payload: emptyPayload } } }); // storage info
+        .mockResolvedValueOnce({
+          custom: { call: { payload: noStorageInfoPayload } },
+        });
 
       await user.click(screen.getByRole("button", { name: /Load Settings/i }));
       await waitFor(() =>
@@ -380,7 +389,9 @@ describe("SettingsSection Component", () => {
 
       mocks.call_rpc
         .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } })
-        .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } }) // storage info
+        .mockResolvedValueOnce({
+          custom: { call: { payload: noStorageInfoPayload } },
+        })
         .mockResolvedValueOnce({ custom: { call: { payload: errorPayload } } });
 
       await user.click(screen.getByRole("button", { name: /Load Settings/i }));
