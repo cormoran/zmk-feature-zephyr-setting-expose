@@ -55,6 +55,10 @@ For more info on modules, you can read through through the [Zephyr modules page]
    # Optionally enable custom Studio RPC
    CONFIG_ZMK_STUDIO=y
    CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
+
+   # Increase rx buffer and custom subsystem request payload size
+   CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
+   CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=128
    ```
 
 3. Implement your custom protocol by editing:
