@@ -149,6 +149,63 @@
   margin-top: 0.5rem;
 }
 
+.settings-groups {
+  margin: 1rem 0;
+}
+
+.settings-group {
+  margin-bottom: 1.5rem;
+}
+
+.settings-group-header {
+  font-size: 0.8rem;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #666;
+  padding: 0.25rem 0;
+  border-bottom: 2px solid #e0e0e0;
+  margin-bottom: 0;
+}
+
+.editing-row {
+  background-color: #fffbeb !important;
+}
+
+.storage-info {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f9f9f9;
+}
+
+.storage-bar-label {
+  font-size: 0.85rem;
+  margin-bottom: 0.4rem;
+  color: #333;
+}
+
+.storage-bar {
+  height: 12px;
+  background: #e0e0e0;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+.storage-bar-used {
+  height: 100%;
+  background: #4a9eff;
+  transition: width 0.3s ease;
+}
+
+.storage-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
 .app-header {
   margin-bottom: 1.5rem;
 }

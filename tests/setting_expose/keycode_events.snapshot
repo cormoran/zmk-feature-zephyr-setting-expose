@@ -1,9 +1,13 @@
 starting unit tests
 PASS: subsystem_found
 PASS: write
+PASS: write_int32
 PASS: read
 PASS: list
 PASS: delete
 PASS: read_after_delete
 PASS: empty_key_error
+PASS: storage_info
+PASS: gc
+PASS: clear_all
 done

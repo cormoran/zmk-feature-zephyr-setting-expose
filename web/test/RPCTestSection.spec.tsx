@@ -6,10 +6,7 @@ import {
   setupZMKMocks,
 } from "@cormoran/zmk-studio-react-hook/testing";
 import { SettingsSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
-import {
-  Response,
-  SettingType,
-} from "../src/proto/zmk/setting_expose/setting_expose";
+import { Response } from "../src/proto/zmk/setting_expose/setting_expose";
 import { connect as serial_connect } from "@zmkfirmware/zmk-studio-ts-client/transport/serial";
 import App from "../src/App";
 
@@ -123,13 +120,11 @@ describe("SettingsSection Component", () => {
           entries: [
             {
               key: "mymod/volume",
-              value: new Uint8Array([0x4b, 0x00, 0x00, 0x00]),
-              type: SettingType.INT32,
+              int32Value: 75,
             },
             {
               key: "mymod/enabled",
-              value: new Uint8Array([0x01]),
-              type: SettingType.BOOL,
+              boolValue: true,
             },
           ],
         },
@@ -148,18 +143,64 @@ describe("SettingsSection Component", () => {
         expect(screen.getByText("mymod/enabled")).toBeInTheDocument();
       });
 
-      expect(screen.getByText("75")).toBeInTheDocument(); // INT32 0x4b = 75
-      expect(screen.getByText("true")).toBeInTheDocument(); // BOOL 1 = true
+      expect(screen.getByText("75")).toBeInTheDocument(); // int32 value
+      expect(screen.getByText("true")).toBeInTheDocument(); // bool value
     });
 
-    it("should show edit form when edit button is clicked", async () => {
+    it("should sort and group settings by prefix", async () => {
+      const payload = encodeResponse({
+        list: {
+          entries: [
+            {
+              key: "ble/profile",
+              int32Value: 0,
+            },
+            {
+              key: "ble/active",
+              int32Value: 1,
+            },
+            {
+              key: "mymod/name",
+              stringValue: "kb",
+            },
+          ],
+        },
+      });
+
+      const user = await renderWithMocks();
+
+      mocks.call_rpc.mockResolvedValueOnce({
+        custom: { call: { payload } },
+      });
+
+      await user.click(screen.getByRole("button", { name: /Load Settings/i }));
+
+      await waitFor(() =>
+        expect(screen.getByText("ble/active")).toBeInTheDocument()
+      );
+
+      // Group headers should be present
+      const headers = screen.getAllByText(/^ble$|^mymod$/i);
+      expect(headers.length).toBeGreaterThanOrEqual(2);
+
+      // ble/active should appear before ble/profile (sorted)
+      const rows = screen.getAllByRole("row");
+      const activeIdx = rows.findIndex((r) =>
+        r.textContent?.includes("ble/active")
+      );
+      const profileIdx = rows.findIndex((r) =>
+        r.textContent?.includes("ble/profile")
+      );
+      expect(activeIdx).toBeLessThan(profileIdx);
+    });
+
+    it("should show edit form above table when edit button clicked", async () => {
       const payload = encodeResponse({
         list: {
           entries: [
             {
               key: "mymod/name",
-              value: new TextEncoder().encode("hello"),
-              type: SettingType.STRING,
+              stringValue: "hello",
             },
           ],
         },
@@ -189,8 +230,7 @@ describe("SettingsSection Component", () => {
           entries: [
             {
               key: "mymod/name",
-              value: new TextEncoder().encode("hello"),
-              type: SettingType.STRING,
+              stringValue: "hello",
             },
           ],
         },
@@ -222,8 +262,7 @@ describe("SettingsSection Component", () => {
           entries: [
             {
               key: "mymod/name",
-              value: new TextEncoder().encode("hello"),
-              type: SettingType.STRING,
+              stringValue: "hello",
             },
           ],
         },
@@ -234,8 +273,7 @@ describe("SettingsSection Component", () => {
           entries: [
             {
               key: "mymod/name",
-              value: new TextEncoder().encode("world"),
-              type: SettingType.STRING,
+              stringValue: "world",
             },
           ],
         },
@@ -243,12 +281,17 @@ describe("SettingsSection Component", () => {
 
       const user = await renderWithMocks();
 
+      // Initial load + storage info (mock both)
       mocks.call_rpc
         .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } })
+        .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } }) // storage info
         .mockResolvedValueOnce({ custom: { call: { payload: writePayload } } })
         .mockResolvedValueOnce({
           custom: { call: { payload: updatedPayload } },
-        });
+        })
+        .mockResolvedValueOnce({
+          custom: { call: { payload: updatedPayload } },
+        }); // storage info after reload
 
       await user.click(screen.getByRole("button", { name: /Load Settings/i }));
       await waitFor(() =>
@@ -277,8 +320,7 @@ describe("SettingsSection Component", () => {
           entries: [
             {
               key: "mymod/temp",
-              value: new Uint8Array([0x01]),
-              type: SettingType.BOOL,
+              boolValue: true,
             },
           ],
         },
@@ -290,8 +332,10 @@ describe("SettingsSection Component", () => {
 
       mocks.call_rpc
         .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } })
+        .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } }) // storage info
         .mockResolvedValueOnce({ custom: { call: { payload: deletePayload } } })
-        .mockResolvedValueOnce({ custom: { call: { payload: emptyPayload } } });
+        .mockResolvedValueOnce({ custom: { call: { payload: emptyPayload } } })
+        .mockResolvedValueOnce({ custom: { call: { payload: emptyPayload } } }); // storage info
 
       await user.click(screen.getByRole("button", { name: /Load Settings/i }));
       await waitFor(() =>
@@ -323,8 +367,7 @@ describe("SettingsSection Component", () => {
           entries: [
             {
               key: "mymod/volume",
-              value: new Uint8Array([0x00, 0x00, 0x00, 0x00]),
-              type: SettingType.INT32,
+              int32Value: 0,
             },
           ],
         },
@@ -337,6 +380,7 @@ describe("SettingsSection Component", () => {
 
       mocks.call_rpc
         .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } })
+        .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } }) // storage info
         .mockResolvedValueOnce({ custom: { call: { payload: errorPayload } } });
 
       await user.click(screen.getByRole("button", { name: /Load Settings/i }));
@@ -354,6 +398,39 @@ describe("SettingsSection Component", () => {
       await waitFor(() =>
         expect(screen.getByText(/storage full/i)).toBeInTheDocument()
       );
+    });
+
+    it("should show storage bar when storage info is available", async () => {
+      const listPayload = encodeResponse({ list: { entries: [] } });
+      const storagePayload = encodeResponse({
+        storageInfo: {
+          totalBytes: 8192,
+          freeBytes: 4096,
+          usedBytes: 4096,
+          garbageBytes: 0,
+        },
+      });
+
+      const user = await renderWithMocks();
+
+      mocks.call_rpc
+        .mockResolvedValueOnce({ custom: { call: { payload: listPayload } } })
+        .mockResolvedValueOnce({
+          custom: { call: { payload: storagePayload } },
+        });
+
+      await user.click(screen.getByRole("button", { name: /Load Settings/i }));
+
+      await waitFor(() =>
+        expect(screen.getByText(/4,096.*\/.*8,192.*bytes/i)).toBeInTheDocument()
+      );
+      expect(screen.getByRole("progressbar")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /Run GC/i })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /Clear All/i })
+      ).toBeInTheDocument();
     });
   });
 });

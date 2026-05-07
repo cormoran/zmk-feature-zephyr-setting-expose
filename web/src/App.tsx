@@ -1,4 +1,4 @@
-import { useCallback, useContext, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import "./App.css";
 import { connect as serial_connect } from "@zmkfirmware/zmk-studio-ts-client/transport/serial";
 import {
@@ -10,24 +10,19 @@ import {
   Request,
   Response,
   SettingEntry,
-  SettingType,
+  StorageInfoResponse,
 } from "./proto/zmk/setting_expose/setting_expose";
 
 export const SUBSYSTEM_IDENTIFIER = "zmk__setting_expose";
 
 // ---- Type helpers ---------------------------------------------------------
 
-function settingTypeLabel(type: SettingType): string {
-  switch (type) {
-    case SettingType.INT32:
-      return "int32";
-    case SettingType.BOOL:
-      return "bool";
-    case SettingType.STRING:
-      return "string";
-    default:
-      return "bytes";
-  }
+/** Return a human-readable type label based on which oneof field is set */
+function typedValueLabel(entry: SettingEntry): string {
+  if (entry.int32Value !== undefined) return "int32";
+  if (entry.boolValue !== undefined) return "bool";
+  if (entry.stringValue !== undefined) return "string";
+  return "bytes";
 }
 
 /** Format a byte array as a hex string for display */
@@ -50,70 +45,68 @@ function hexToBytes(hex: string): Uint8Array | null {
   return result;
 }
 
-/** Encode a typed value to bytes for writing */
-function typedValueToBytes(
+/** Format a SettingEntry's typed value as a human-readable string */
+function typedValueDisplay(entry: SettingEntry): string {
+  if (entry.int32Value !== undefined) return String(entry.int32Value);
+  if (entry.boolValue !== undefined) return entry.boolValue ? "true" : "false";
+  if (entry.stringValue !== undefined) return entry.stringValue;
+  if (entry.bytesValue && entry.bytesValue.length > 0)
+    return bytesToHex(entry.bytesValue);
+  return "(empty)";
+}
+
+/** Default placeholder for the edit input based on setting type */
+function editPlaceholder(entry: SettingEntry): string {
+  if (entry.int32Value !== undefined) return "e.g. 42";
+  if (entry.boolValue !== undefined) return "true or false";
+  if (entry.stringValue !== undefined) return "enter text";
+  return "hex bytes, e.g. DE AD BE EF";
+}
+
+/**
+ * Parse the raw edit string back into typed value fields for WriteRequest.
+ * Returns null if the input is invalid for the setting type.
+ */
+function parseEditValue(
   rawInput: string,
-  type: SettingType
-): Uint8Array | null {
-  switch (type) {
-    case SettingType.INT32: {
-      const n = parseInt(rawInput, 10);
-      if (isNaN(n)) return null;
-      const buf = new ArrayBuffer(4);
-      new DataView(buf).setInt32(0, n, /* littleEndian= */ true);
-      return new Uint8Array(buf);
-    }
-    case SettingType.BOOL: {
-      const lower = rawInput.trim().toLowerCase();
-      if (lower === "true" || lower === "1") return new Uint8Array([1]);
-      if (lower === "false" || lower === "0") return new Uint8Array([0]);
-      return null;
-    }
-    case SettingType.STRING:
-      return new TextEncoder().encode(rawInput);
-    default:
-      return hexToBytes(rawInput);
+  entry: SettingEntry
+): Partial<
+  Pick<
+    Request["write"] & object,
+    "int32Value" | "boolValue" | "stringValue" | "bytesValue"
+  >
+> | null {
+  if (entry.int32Value !== undefined) {
+    const n = parseInt(rawInput, 10);
+    if (isNaN(n)) return null;
+    return { int32Value: n };
   }
+  if (entry.boolValue !== undefined) {
+    const lower = rawInput.trim().toLowerCase();
+    if (lower === "true" || lower === "1") return { boolValue: true };
+    if (lower === "false" || lower === "0") return { boolValue: false };
+    return null;
+  }
+  if (entry.stringValue !== undefined) return { stringValue: rawInput };
+  const bytes = hexToBytes(rawInput);
+  if (!bytes) return null;
+  return { bytesValue: bytes };
 }
 
-/** Format bytes as a human-readable value based on type */
-function bytesToTypedDisplay(bytes: Uint8Array, type: SettingType): string {
-  if (bytes.length === 0) return "(empty)";
-  switch (type) {
-    case SettingType.INT32: {
-      if (bytes.length < 4) return bytesToHex(bytes) + " (too short for int32)";
-      const v = new DataView(
-        bytes.buffer,
-        bytes.byteOffset,
-        bytes.byteLength
-      ).getInt32(0, true);
-      return String(v);
-    }
-    case SettingType.BOOL:
-      return bytes[0] !== 0 ? "true" : "false";
-    case SettingType.STRING:
-      try {
-        return new TextDecoder().decode(bytes);
-      } catch {
-        return bytesToHex(bytes);
-      }
-    default:
-      return bytesToHex(bytes);
-  }
-}
+// ---- Grouping helpers -----------------------------------------------------
 
-/** Default edit placeholder/example based on type */
-function editPlaceholder(type: SettingType): string {
-  switch (type) {
-    case SettingType.INT32:
-      return "e.g. 42";
-    case SettingType.BOOL:
-      return "true or false";
-    case SettingType.STRING:
-      return "enter text";
-    default:
-      return "hex bytes, e.g. DE AD BE EF";
+/** Group sorted entries by their first path segment (before the first '/') */
+function groupByPrefix(entries: SettingEntry[]): [string, SettingEntry[]][] {
+  const sorted = [...entries].sort((a, b) => a.key.localeCompare(b.key));
+  const map = new Map<string, SettingEntry[]>();
+  for (const entry of sorted) {
+    const slash = entry.key.indexOf("/");
+    const prefix = slash >= 0 ? entry.key.slice(0, slash) : "";
+    const group = map.get(prefix) ?? [];
+    group.push(entry);
+    map.set(prefix, group);
   }
+  return Array.from(map.entries());
 }
 
 // ---- RPC helpers ----------------------------------------------------------
@@ -198,6 +191,13 @@ export function SettingsSection() {
   const [editValue, setEditValue] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [storageInfo, setStorageInfo] = useState<StorageInfoResponse | null>(
+    null
+  );
+  const [isGcing, setIsGcing] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const subsystem = zmkApp?.findSubsystem(SUBSYSTEM_IDENTIFIER);
 
@@ -205,6 +205,13 @@ export function SettingsSection() {
     if (!zmkApp?.state.connection || !subsystem) return null;
     return new ZMKCustomSubsystem(zmkApp.state.connection, subsystem.index);
   }, [zmkApp, subsystem]);
+
+  /* Auto-focus the edit input whenever a new entry is being edited */
+  useEffect(() => {
+    if (editEntry) {
+      inputRef.current?.focus();
+    }
+  }, [editEntry]);
 
   if (!zmkApp) return null;
 
@@ -242,11 +249,27 @@ export function SettingsSection() {
     } finally {
       setIsLoading(false);
     }
+
+    /* Refresh storage info whenever we reload settings */
+    const service2 = getService();
+    if (service2) {
+      try {
+        const infoResp = await callRPC(
+          service2,
+          Request.create({ storageInfo: {} })
+        );
+        if (infoResp.storageInfo) {
+          setStorageInfo(infoResp.storageInfo);
+        }
+      } catch {
+        /* storage info is best-effort, ignore errors */
+      }
+    }
   };
 
   const startEdit = (entry: SettingEntry) => {
     setEditEntry(entry);
-    setEditValue(bytesToTypedDisplay(entry.value, entry.type));
+    setEditValue(typedValueDisplay(entry));
     setEditError(null);
   };
 
@@ -261,8 +284,8 @@ export function SettingsSection() {
     const service = getService();
     if (!service) return;
 
-    const bytes = typedValueToBytes(editValue, editEntry.type);
-    if (bytes === null) {
+    const typedFields = parseEditValue(editValue, editEntry);
+    if (typedFields === null) {
       setEditError("Invalid value for the setting type");
       return;
     }
@@ -273,7 +296,7 @@ export function SettingsSection() {
       const resp = await callRPC(
         service,
         Request.create({
-          write: { key: editEntry.key, value: bytes },
+          write: { key: editEntry.key, ...typedFields },
         })
       );
       if (resp.error) {
@@ -309,6 +332,48 @@ export function SettingsSection() {
     }
   };
 
+  const handleGc = async () => {
+    const service = getService();
+    if (!service) return;
+    setIsGcing(true);
+    try {
+      await callRPC(service, Request.create({ gc: {} }));
+      await loadSettings();
+    } catch (e) {
+      setError(`GC failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setIsGcing(false);
+    }
+  };
+
+  const handleClearAll = async () => {
+    if (
+      !confirm("⚠️ Delete ALL settings on the device? This cannot be undone.")
+    )
+      return;
+    const service = getService();
+    if (!service) return;
+    setIsClearing(true);
+    setError(null);
+    try {
+      const resp = await callRPC(service, Request.create({ clearAll: {} }));
+      if (resp.error) {
+        setError(`Clear all failed: ${resp.error.message}`);
+      } else {
+        setSettings([]);
+        await loadSettings();
+      }
+    } catch (e) {
+      setError(
+        `Clear all failed: ${e instanceof Error ? e.message : String(e)}`
+      );
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
+  const groups = groupByPrefix(settings);
+
   return (
     <section className="card">
       <h2>Settings</h2>
@@ -316,6 +381,44 @@ export function SettingsSection() {
         List, edit, or delete Zephyr settings stored on the device. The device
         must be unlocked in ZMK Studio first.
       </p>
+
+      {/* ---- Storage capacity bar ---- */}
+      {storageInfo && storageInfo.totalBytes > 0 && (
+        <div className="storage-info">
+          <div className="storage-bar-label">
+            Storage: {storageInfo.usedBytes.toLocaleString()} /{" "}
+            {storageInfo.totalBytes.toLocaleString()} bytes used (
+            {Math.round((storageInfo.freeBytes / storageInfo.totalBytes) * 100)}
+            % free)
+          </div>
+          <div className="storage-bar" role="progressbar">
+            <div
+              className="storage-bar-used"
+              style={{
+                width: `${(storageInfo.usedBytes / storageInfo.totalBytes) * 100}%`,
+              }}
+            />
+          </div>
+          <div className="storage-actions">
+            <button
+              className="btn btn-secondary btn-small"
+              onClick={handleGc}
+              disabled={isGcing}
+              title="Trigger NVS sector compaction"
+            >
+              {isGcing ? "⏳ Running…" : "🗑️ Run GC"}
+            </button>
+            <button
+              className="btn btn-danger btn-small"
+              onClick={handleClearAll}
+              disabled={isClearing}
+              title="Delete all settings on device (irreversible)"
+            >
+              {isClearing ? "⏳ Clearing…" : "⚠️ Clear All"}
+            </button>
+          </div>
+        </div>
+      )}
 
       <button
         className="btn btn-primary"
@@ -331,62 +434,19 @@ export function SettingsSection() {
         </div>
       )}
 
-      {settings.length === 0 && !isLoading && !error && (
-        <p>
-          No settings loaded. Click &quot;Load Settings&quot; to fetch from
-          device.
-        </p>
-      )}
-
-      {settings.length > 0 && (
-        <table className="settings-table">
-          <thead>
-            <tr>
-              <th>Key</th>
-              <th>Value</th>
-              <th>Type</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {settings.map((entry) => (
-              <tr key={entry.key}>
-                <td className="key-cell">{entry.key}</td>
-                <td className="value-cell">
-                  {bytesToTypedDisplay(entry.value, entry.type)}
-                </td>
-                <td>{settingTypeLabel(entry.type)}</td>
-                <td>
-                  <button
-                    className="btn btn-secondary btn-small"
-                    onClick={() => startEdit(entry)}
-                  >
-                    ✏️ Edit
-                  </button>{" "}
-                  <button
-                    className="btn btn-danger btn-small"
-                    onClick={() => deleteSetting(entry.key)}
-                  >
-                    🗑️ Delete
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
+      {/* ---- Edit form (placed above the table) ---- */}
       {editEntry && (
         <div className="edit-form">
           <h3>Edit: {editEntry.key}</h3>
           <label htmlFor="edit-value">
-            Value ({settingTypeLabel(editEntry.type)}):
+            Value ({typedValueLabel(editEntry)}):
           </label>
           <input
             id="edit-value"
+            ref={inputRef}
             type="text"
             value={editValue}
-            placeholder={editPlaceholder(editEntry.type)}
+            placeholder={editPlaceholder(editEntry)}
             onChange={(e) => setEditValue(e.target.value)}
           />
           {editError && (
@@ -406,6 +466,64 @@ export function SettingsSection() {
               Cancel
             </button>
           </div>
+        </div>
+      )}
+
+      {settings.length === 0 && !isLoading && !error && (
+        <p>
+          No settings loaded. Click &quot;Load Settings&quot; to fetch from
+          device.
+        </p>
+      )}
+
+      {/* ---- Settings table grouped by prefix ---- */}
+      {groups.length > 0 && (
+        <div className="settings-groups">
+          {groups.map(([prefix, entries]) => (
+            <div key={prefix} className="settings-group">
+              {prefix !== "" && (
+                <div className="settings-group-header">{prefix}</div>
+              )}
+              <table className="settings-table">
+                <thead>
+                  <tr>
+                    <th>Key</th>
+                    <th>Value</th>
+                    <th>Type</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((entry) => (
+                    <tr
+                      key={entry.key}
+                      className={
+                        editEntry?.key === entry.key ? "editing-row" : ""
+                      }
+                    >
+                      <td className="key-cell">{entry.key}</td>
+                      <td className="value-cell">{typedValueDisplay(entry)}</td>
+                      <td>{typedValueLabel(entry)}</td>
+                      <td>
+                        <button
+                          className="btn btn-secondary btn-small"
+                          onClick={() => startEdit(entry)}
+                        >
+                          ✏️ Edit
+                        </button>{" "}
+                        <button
+                          className="btn btn-danger btn-small"
+                          onClick={() => deleteSetting(entry.key)}
+                        >
+                          🗑️ Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
         </div>
       )}
     </section>

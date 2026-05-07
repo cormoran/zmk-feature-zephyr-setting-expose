@@ -2,6 +2,7 @@ zephyr_include_directories(include)
 if(CONFIG_ZMK_SETTING_EXPOSE)
     file(GLOB_RECURSE C_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/studio/setting_expose_handler.c)
     target_sources(app PRIVATE ${C_FILES})
+    target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/zmk_known_settings.c)
 
     if(CONFIG_ZMK_SETTING_EXPOSE_UNIT_TEST)
         target_sources(app PRIVATE
