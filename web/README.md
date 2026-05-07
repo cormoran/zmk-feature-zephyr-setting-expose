@@ -1,15 +1,17 @@
-# ZMK Module Template - Web Frontend
+# ZMK Setting Expose – Web Frontend
 
-This is a minimal web application template for interacting with ZMK firmware
-modules that implement custom Studio RPC subsystems.
+A React + TypeScript web app for browsing and editing Zephyr settings stored on a ZMK keyboard, using the custom Studio RPC protocol.
 
 ## Features
 
-- **Device Connection**: Connect to ZMK devices via Bluetooth (GATT) or Serial
-- **Custom RPC**: Communicate with your custom firmware module using protobuf
-- **React + TypeScript**: Modern web development with Vite for fast builds
-- **react-zmk-studio**: Uses the `@cormoran/zmk-studio-react-hook` library for
-  simplified ZMK integration
+- **Device Connection**: Connect via Serial (WebSerial API)
+- **List Settings**: Enumerate all persisted NVS settings, grouped by key prefix
+- **Type-aware display**: `int32`, `bool`, `string`, and raw `bytes` rendered appropriately
+- **Edit / Write**: Inline editor with type validation
+- **Delete**: Remove individual settings (with confirmation)
+- **Storage Info**: Visual capacity bar (total / used / free bytes)
+- **GC**: Trigger NVS sector garbage collection
+- **Clear All**: Wipe every setting on the device (with confirmation)
 
 ## Quick Start
 
@@ -35,11 +37,11 @@ npm test
 ```
 src/
 ├── main.tsx              # React entry point
-├── App.tsx               # Main application with connection UI
+├── App.tsx               # Main application component
 ├── App.css               # Styles
 └── proto/                # Generated protobuf TypeScript types
-    └── zmk/template/
-        └── template.ts
+    └── zmk/setting_expose/
+        └── setting_expose.ts
 
 test/
 ├── App.spec.tsx              # Tests for App component
@@ -50,7 +52,9 @@ test/
 
 ### 1. Protocol Definition
 
-The protobuf schema is defined in `../proto/zmk/template/template.proto`.
+The protobuf schema is defined in `../proto/zmk/setting_expose/setting_expose.proto`.
+Messages support a `oneof typed_value` field (`bytes`, `int32`, `bool`, `string`) so the
+UI can render an appropriate editor per entry.
 
 ### 2. Code Generation
 
@@ -60,7 +64,7 @@ TypeScript types are generated using `ts-proto`:
 npm run generate
 ```
 
-This runs `buf generate` which uses the configuration in `buf.gen.yaml`.
+This runs `buf generate` using the configuration in `buf.gen.yaml`.
 
 ### 3. Using react-zmk-studio
 
@@ -69,33 +73,28 @@ The app uses the `@cormoran/zmk-studio-react-hook` library:
 ```typescript
 import { useZMKApp, ZMKCustomSubsystem } from "@cormoran/zmk-studio-react-hook";
 
-// Connect to device
-const { state, connect, findSubsystem, isConnected } = useZMKApp();
+const { state, findSubsystem } = useZMKApp();
 
-// Find your subsystem
-const subsystem = findSubsystem("zmk__template");
-
-// Create service and make RPC calls
+const subsystem = findSubsystem("zmk__setting_expose");
 const service = new ZMKCustomSubsystem(state.connection, subsystem.index);
-const response = await service.callRPC(payload);
+
+// Example: list all settings
+const payload = Request.encode(Request.create({ list: {} })).finish();
+const raw = await service.callRPC(payload);
+const response = Response.decode(raw);
 ```
+
+The device must be **unlocked in ZMK Studio** before the subsystem accepts requests.
 
 ## Testing
 
 ```bash
-# Run all tests
-npm test
-
-# Run tests in watch mode
-npm run test:watch
-
-# Run tests with coverage
+npm test             # run all tests
+npm run test:watch   # watch mode
 npm run test:coverage
 ```
 
 ### Writing Tests
-
-Use the test helpers from `@cormoran/zmk-studio-react-hook/testing`:
 
 ```typescript
 import {
@@ -105,25 +104,12 @@ import {
 
 const mockZMKApp = createConnectedMockZMKApp({
   deviceName: "Test Device",
-  subsystems: ["zmk__template"],
+  subsystems: ["zmk__setting_expose"],
 });
 
 render(
   <ZMKAppProvider value={mockZMKApp}>
-    <YourComponent />
+    <SettingsSection />
   </ZMKAppProvider>
 );
 ```
-
-## Customization
-
-To adapt this template for your own ZMK module:
-
-1. **Update the proto file**: Modify `../proto/zmk/template/template.proto` with
-   your message types
-2. **Regenerate types**: Run `npm run generate`
-3. **Update subsystem identifier**: Change `SUBSYSTEM_IDENTIFIER` in `App.tsx`
-   to match your firmware registration
-4. **Update RPC logic**: Modify the request/response handling in `App.tsx`
-5. **Update tests**: Modify tests to match your custom subsystem identifier and
-   functionality
