@@ -1,70 +1,93 @@
-# cormoran's ZMK Module Template for ZMK (with Custom Studio RPC)
+# ZMK Feature: Zephyr Setting Expose
 
 ![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
-[![Test](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml)
+[![Test](https://github.com/cormoran/zmk-feature-zephyr-setting-expose/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-feature-zephyr-setting-expose/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-feature-zephyr-setting-expose/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-feature-zephyr-setting-expose/actions/workflows/devcontainer.yml)
 
-This repository contains a template for a ZMK module with Web UI using the **unofficial** custom ZMK Studio RPC protocol.
-
-It's extended from ZMK official template with [zmk-west-commands](https://github.com/cormoran/zmk-west-commands), test code template, coding agent support, and custom Studio RPC protocol support.
+This ZMK module exposes the Zephyr settings store (NVS key/value pairs) to a connected browser via the **unofficial** custom ZMK Studio RPC protocol. It lets you inspect, edit, or delete any persisted setting on your keyboard without reflashing firmware.
 
 ## Summary
 
-This template includes:
+- **Firmware**: Custom Studio RPC handler (`src/studio/setting_expose_handler.c`)
+- **Protocol**: Protobuf definition (`proto/zmk/setting_expose/setting_expose.proto`)
+- **Web UI**: React + TypeScript app (`web/`) at `https://cormoran.github.io/zmk-feature-zephyr-setting-expose/`
+- **Tests**: Firmware unit tests (`tests/studio/`, `tests/setting_expose/`) and build tests (`tests/zmk-config/`)
 
-- **Firmware**: Sample custom Studio RPC handler (`src/studio/template_handler.c`)
-- **Protocol**: Protobuf definition (`proto/zmk/template/template.proto`)
-- **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
-- **Tests**: Firmware unit tests (`tests/studio/`) and build tests (`tests/zmk-config/`)
+### Supported operations
 
-Read through the [ZMK Module Creation](https://zmk.dev/docs/development/module-creation) page for details on how to configure this template.
+| Operation | Description |
+|-----------|-------------|
+| List | Enumerate all persisted settings with typed values |
+| Read | Read a single setting by key |
+| Write | Write (persist) a setting value |
+| Delete | Delete (reset) a setting by key |
+| Storage Info | Query NVS storage capacity (total / used / free bytes) |
+| GC | Trigger NVS garbage collection / sector compaction |
+| Clear All | Delete every persisted setting on the device |
 
-## More Info
+### Type system
 
-For more info on modules, you can read through through the [Zephyr modules page](https://docs.zephyrproject.org/3.5.0/develop/modules.html) and [ZMK's page on using modules](https://zmk.dev/docs/features/modules). [Zephyr's west manifest page](https://docs.zephyrproject.org/3.5.0/develop/west/manifest.html#west-manifests) may also be of use.
+Settings are displayed and edited with type-aware UIs. Firmware code annotates keys with a type via the `ZMK_SETTING_EXPOSE_REGISTER` macro (see [include/zmk/setting_expose.h](include/zmk/setting_expose.h)):
+
+| Type | Encoding | Web UI |
+|------|----------|--------|
+| `BYTES` (default) | raw bytes | hex string |
+| `INT32` | 4-byte little-endian | number input |
+| `BOOL` | 1 byte | `true`/`false` |
+| `STRING` | UTF-8 | text input |
+
+Well-known ZMK settings (BLE profile, output transport, physical layout, behavior local IDs) are pre-registered in `src/zmk_known_settings.c`.
 
 ## Module User Guide
 
-1. Add dependency to your `config/west.yml`. Note: this module requires a patched ZMK with custom Studio RPC support.
+### 1. Add dependency to your `config/west.yml`
 
-   ```yml
-   manifest:
-       remotes:
-           ...
-           - name: cormoran
-           url-base: https://github.com/cormoran
-       projects:
-           ...
-           - name: zmk-module-template
-           remote: cormoran
-           revision: main+custom-studio-protocol # or latest commit hash
-           # import: true # if this module has other dependencies
-           ...
-           # Required: patched ZMK with custom Studio RPC support
-           - name: zmk
-           remote: cormoran
-           revision: main+custom-studio-protocol
-           import:
-               file: app/west.yml
-   ```
+> **Note**: This module requires a patched ZMK with custom Studio RPC support.
 
-2. Enable flags in your `config/<shield>.conf`
+```yml
+manifest:
+    remotes:
+        ...
+        - name: cormoran
+          url-base: https://github.com/cormoran
+    projects:
+        ...
+        - name: zmk-feature-zephyr-setting-expose
+          remote: cormoran
+          revision: main
+        # Required: patched ZMK with custom Studio RPC support
+        - name: zmk
+          remote: cormoran
+          revision: main+custom-studio-protocol
+          import:
+              file: app/west.yml
+```
 
-   ```conf
-   CONFIG_ZMK_TEMPLATE_FEATURE=y
+### 2. Enable the module in your `config/<shield>.conf`
 
-   # Optionally enable custom Studio RPC
-   CONFIG_ZMK_STUDIO=y
-   CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
+```conf
+CONFIG_ZMK_STUDIO=y
+CONFIG_ZMK_SETTING_EXPOSE=y
 
-   # Increase rx buffer and custom subsystem request payload size
-   CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
-   CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=128
-   ```
+# Increase RPC buffers to fit setting payloads
+CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
+CONFIG_ZMK_STUDIO_RPC_CUSTOM_SUBSYSTEM_REQUEST_PAYLOAD_MAX_BYTES=140
+```
 
-3. Implement your custom protocol by editing:
-   - `proto/zmk/template/template.proto` — message types
-   - `src/studio/template_handler.c` — firmware RPC handler
-   - `web/src/App.tsx` — web UI
+### 3. (Optional) Register type hints for your own settings
+
+```c
+#include <zmk/setting_expose.h>
+
+// Exact key: display as an integer
+ZMK_SETTING_EXPOSE_REGISTER(my_volume, "mymod/volume", ZMK_SETTING_TYPE_INT32);
+
+// Prefix: all keys starting with "mymod/name/" displayed as strings
+ZMK_SETTING_EXPOSE_REGISTER_PREFIX(my_names, "mymod/name/", ZMK_SETTING_TYPE_STRING);
+```
+
+### 4. Open the Web UI
+
+Navigate to [https://cormoran.github.io/zmk-feature-zephyr-setting-expose/](https://cormoran.github.io/zmk-feature-zephyr-setting-expose/), connect your keyboard via serial, and unlock the device in ZMK Studio. Then click **Load Settings** to browse and edit your keyboard's settings.
 
 ### Web UI
 
@@ -72,44 +95,32 @@ See [web/README.md](./web/README.md) for web UI development instructions.
 
 ### Publishing Web UI
 
-**GitHub Pages**: Visit `Actions > Test and Build Web UI > Run workflow` to deploy to `https://<account>.github.io/<repo>/`.
+**GitHub Pages**: Visit `Actions > Test and Build Web UI > Run workflow` to deploy.
 
 **Cloudflare Workers (PR previews)**: Configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets.
 
 ## Module Development Guide
 
-### Setup for running test
+### Setup for running tests
 
-#### Option0: Dev container (recommended)
+#### Option 0: Dev container (recommended)
 
-Open this repository in VS Code with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers). The container automatically initializes the west workspace using the isolated layout.
+Open this repository in VS Code with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers). The container automatically initializes the west workspace.
 
-#### Option1: west workspace directory layout
-
-Set west topdir as parent of repository root and download dependencies under `../`.
-This layout is useful to reduce disk usage by sharing dependencies with other zephyr modules.
-The build result is located in `../build`.
+#### Option 1: Shared west workspace layout
 
 ```bash
-mkdir west-workspace
-cd west-workspace # this directory becomes west workspace root (topdir)
+mkdir west-workspace && cd west-workspace
 git clone <this repository>
-# rm -r .west # if exists to reset workspace
 west init -l . --mf west/west-test-workspace.yml
 west update --narrow
 west zephyr-export
 ```
 
-#### Option2: isolated directory layout
-
-Set west topdir as repository root and download dependencies under `./dependencies`.
-This layout is useful if you don't want to share dependencies to other zephyr modules.
-Dev container and github actions uses this layout.
-The build result is located in `./build`.
+#### Option 2: Isolated layout
 
 ```bash
-git clone <this repository>
-cd <cloned directory>
+git clone <this repository> && cd <cloned directory>
 west init -l west --mf west-test-isolated.yml
 west update --narrow
 west zephyr-export
@@ -117,19 +128,15 @@ west zephyr-export
 
 ### Pre-commit
 
-Every commit need to pass pre-commit verification. The verification contains formatting code and running tests.
-
-```
+```bash
 pip install pre-commit
 pre-commit install
 
-# Run pre-commit manually
+# Run manually
 pre-commit run --all-files
-# Run for git staged files
-pre-commit run
 ```
 
-### Running Test
+### Running Tests
 
 ```bash
 # Run unit test + build test and verify the results
@@ -146,12 +153,7 @@ cd web && npm test
 
 Run `Actions > Sync Changes in Template > Run workflow` to get the latest template changes as a pull request.
 
-If the template contains changes in `.github/workflows/*`, register a GitHub personal access token as `GH_TOKEN` repository secret (`repo` + `workflow` scopes).
-
-### Coding agent on actions
-
-Actions for github copilot and claude are available.
+### Coding agent on Actions
 
 - Mention `@copilot`
 - Setup `ANTHROPIC_API_KEY` secret and mention `@claude`
-  - Or fix [claude.yml](./github/workflows/claude.yml) to use `CLAUDE_CODE_OAUTH_TOKEN`

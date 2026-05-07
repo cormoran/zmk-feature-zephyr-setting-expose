@@ -1,21 +1,11 @@
-This repository contains a ZMK module with Web UI using the **unofficial** custom ZMK Studio RPC protocol.
+This repository is a ZMK module that exposes the Zephyr settings store (NVS key/value pairs) via the **unofficial** custom ZMK Studio RPC protocol. It lets a connected browser list, read, write, delete, and manage all persisted settings on a ZMK keyboard without reflashing.
 
-## Initialization (first time only)
-
-This repo is created from template. Run the following to find all places that need to be replaced:
-
-```
-rg '(t|T)emplate'
-```
-
-Key things to replace:
-
-- Rename `proto/zmk/template/template.proto` and `src/studio/template_handler.c` with your feature name, and update all references found by the search above.
-- Update `zephyr/module.yml`: change the module name.
-- Update `README.md`: replace template descriptions with your module's description.
-- Update `web/vite.config.ts`: change `base` to your repository name.
-
-Remove this "Initialization" section from AGENTS.md (CLAUDE.md is symlink) after completing all items.
+Key files:
+- `proto/zmk/setting_expose/setting_expose.proto` — RPC message definitions
+- `src/studio/setting_expose_handler.c` — firmware RPC handler
+- `include/zmk/setting_expose.h` — public API (`ZMK_SETTING_EXPOSE_REGISTER` macros)
+- `src/zmk_known_settings.c` — built-in type hints for well-known ZMK settings
+- `web/src/App.tsx` — React web UI
 
 ## Dev Rules
 
