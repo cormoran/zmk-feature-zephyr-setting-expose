@@ -18,8 +18,9 @@ describe("App Component", () => {
     it("should render the application header", () => {
       render(<App />);
 
-      expect(screen.getByText(/ZMK Module Template/i)).toBeInTheDocument();
-      expect(screen.getByText(/Custom Studio RPC Demo/i)).toBeInTheDocument();
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+        /ZMK Setting Expose/i
+      );
     });
 
     it("should render connection button when disconnected", () => {
@@ -31,7 +32,7 @@ describe("App Component", () => {
     it("should render footer", () => {
       render(<App />);
 
-      expect(screen.getByText(/Template Module/i)).toBeInTheDocument();
+      expect(screen.getByText(/Manage Zephyr settings/i)).toBeInTheDocument();
     });
   });
 
@@ -45,7 +46,7 @@ describe("App Component", () => {
     it("should connect to device when connect button is clicked", async () => {
       mocks.mockSuccessfulConnection({
         deviceName: "Test Keyboard",
-        subsystems: ["zmk__template"],
+        subsystems: ["zmk__setting_expose"],
       });
 
       const { connect: serial_connect } =
@@ -67,7 +68,9 @@ describe("App Component", () => {
       });
 
       expect(screen.getByText(/Disconnect/i)).toBeInTheDocument();
-      expect(screen.getByText(/RPC Test/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: /Settings/i, level: 2 })
+      ).toBeInTheDocument();
     });
   });
 });

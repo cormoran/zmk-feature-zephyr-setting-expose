@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package zmk.setting_expose;
+
+// A single setting key/value pair with type-safe value via oneof.
+message SettingEntry {
+    string key = 1;
+    oneof typed_value {
+        bytes bytes_value = 2;
+        int32 int32_value = 3;
+        bool bool_value = 4;
+        string string_value = 5;
+    }
+}
+
+// List all persisted settings.
+message ListRequest {}
+
+message ListResponse { repeated SettingEntry entries = 1; }
+
+// Read a single setting by key.
+message ReadRequest { string key = 1; }
+
+message ReadResponse {
+    string key = 1;
+    oneof typed_value {
+        bytes bytes_value = 2;
+        int32 int32_value = 3;
+        bool bool_value = 4;
+        string string_value = 5;
+    }
+}
+
+// Write (persist) a setting value.
+message WriteRequest {
+    string key = 1;
+    oneof typed_value {
+        bytes bytes_value = 2;
+        int32 int32_value = 3;
+        bool bool_value = 4;
+        string string_value = 5;
+    }
+}
+
+message WriteResponse {}
+
+// Delete (reset) a setting by key.
+message DeleteRequest { string key = 1; }
+
+message DeleteResponse {}
+
+// Query the settings storage backend capacity.
+message StorageInfoRequest {}
+
+message StorageInfoResponse {
+    uint32 total_bytes = 1;   // 0 if unknown
+    uint32 free_bytes = 2;    // 0 if unknown
+    uint32 used_bytes = 3;    // 0 if unknown
+    uint32 garbage_bytes = 4; // NVS stale-ATE estimate; 0 if not available
+}
+
+// Trigger garbage collection / compaction of the settings storage backend.
+message GcRequest {}
+
+message GcResponse {}
+
+// Delete ALL persisted settings. The web UI must show a confirmation dialog.
+message ClearAllRequest {}
+
+message ClearAllResponse {}
+
+message ErrorResponse { string message = 1; }
+
+message Request {
+    oneof request_type {
+        ListRequest list = 1;
+        ReadRequest read = 2;
+        WriteRequest write = 3;
+        DeleteRequest delete = 4;
+        StorageInfoRequest storage_info = 5;
+        GcRequest gc = 6;
+        ClearAllRequest clear_all = 7;
+    }
+}
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        ListResponse list = 2;
+        ReadResponse read = 3;
+        WriteResponse write = 4;
+        DeleteResponse delete = 5;
+        StorageInfoResponse storage_info = 6;
+        GcResponse gc = 7;
+        ClearAllResponse clear_all = 8;
+    }
+}

@@ -1,10 +1,23 @@
-config ZMK_TEMPLATE_FEATURE
-    bool "Enable template feature"
-
-if ZMK_TEMPLATE_FEATURE
-
-config ZMK_TEMPLATE_FEATURE_STUDIO_RPC
-    bool "Enable template feature custom Studio RPC"
+config ZMK_SETTING_EXPOSE
+    bool "Expose Zephyr settings via ZMK Studio RPC"
     depends on ZMK_STUDIO
+    depends on SETTINGS
+    help
+      Enables the setting_expose custom Studio RPC subsystem, which allows
+      a connected ZMK Studio web UI to list, read, write, and delete Zephyr
+      settings stored on the device.
+
+      The subsystem requires the ZMK Studio unlock command (SECURED security
+      level) to prevent unauthorized access to device settings.
+
+if ZMK_SETTING_EXPOSE
+
+config ZMK_SETTING_EXPOSE_UNIT_TEST
+    bool "Run setting_expose RPC unit tests at boot (for testing only)"
+    depends on LOG
+    help
+      When enabled, a SYS_INIT function exercises the setting_expose RPC
+      handler at boot and logs PASS/FAIL results for each test case.
+      This option is intended for automated testing only.
 
 endif
