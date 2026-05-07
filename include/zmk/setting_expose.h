@@ -39,15 +39,17 @@ enum zmk_setting_type {
 
 /**
  * Internal structure stored in an iterable section.
- * Use ZMK_SETTING_EXPOSE_REGISTER() instead of this directly.
+ * Use ZMK_SETTING_EXPOSE_REGISTER() / ZMK_SETTING_EXPOSE_REGISTER_PREFIX() instead of this
+ * directly.
  */
 struct zmk_setting_expose_entry {
     const char *key;
     enum zmk_setting_type type;
+    bool is_prefix; /**< When true, key is matched as a prefix against setting keys. */
 };
 
 /**
- * Register a type hint for a Zephyr settings key.
+ * Register a type hint for a Zephyr settings key (exact match).
  *
  * @param _name  C identifier used as the variable name (must be unique).
  * @param _key   Full Zephyr settings key string (e.g. "mymod/brightness").
@@ -57,4 +59,22 @@ struct zmk_setting_expose_entry {
     STRUCT_SECTION_ITERABLE(zmk_setting_expose_entry, zmk_setting_expose_entry_##_name) = {        \
         .key = (_key),                                                                             \
         .type = (_type),                                                                           \
+        .is_prefix = false,                                                                        \
+    }
+
+/**
+ * Register a type hint for all Zephyr settings keys that start with a given prefix.
+ *
+ * Exact-match registrations (ZMK_SETTING_EXPOSE_REGISTER) take priority over prefix matches.
+ *
+ * @param _name    C identifier used as the variable name (must be unique).
+ * @param _prefix  Key prefix string (e.g. "behavior/local_id/").  Any key that starts with this
+ *                 string will be assigned _type.
+ * @param _type    One of the zmk_setting_type enum values.
+ */
+#define ZMK_SETTING_EXPOSE_REGISTER_PREFIX(_name, _prefix, _type)                                  \
+    STRUCT_SECTION_ITERABLE(zmk_setting_expose_entry, zmk_setting_expose_entry_##_name) = {        \
+        .key = (_prefix),                                                                          \
+        .type = (_type),                                                                           \
+        .is_prefix = true,                                                                         \
     }

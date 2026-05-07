@@ -31,12 +31,5 @@ ZMK_SETTING_EXPOSE_REGISTER(physical_layouts_selected, "physical_layouts/selecte
 
 /* ---- Behavior local IDs (device name strings) --------------------------- */
 
-#define _REGISTER_BEHAVIOR_LOCAL_ID(n)                                                             \
-    ZMK_SETTING_EXPOSE_REGISTER(behavior_local_id_##n, "behavior/local_id/" #n,                    \
-                                ZMK_SETTING_TYPE_STRING)
-
-_REGISTER_BEHAVIOR_LOCAL_ID(0);
-_REGISTER_BEHAVIOR_LOCAL_ID(1);
-_REGISTER_BEHAVIOR_LOCAL_ID(2);
-_REGISTER_BEHAVIOR_LOCAL_ID(3);
-_REGISTER_BEHAVIOR_LOCAL_ID(4);
+ZMK_SETTING_EXPOSE_REGISTER_PREFIX(behavior_local_id, "behavior/local_id/",
+                                   ZMK_SETTING_TYPE_STRING);

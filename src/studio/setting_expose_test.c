@@ -373,6 +373,39 @@ static bool test_empty_key_error(const struct zmk_rpc_custom_subsystem *sub) {
     return resp.which_response_type == zmk_setting_expose_Response_error_tag;
 }
 
+static bool test_prefix_type_match(const struct zmk_rpc_custom_subsystem *sub) {
+    /*
+     * The zmk_custom_CallRequest payload cap is 25 bytes, too small to fit a
+     * WriteRequest with a key as long as "behavior/local_id/0" (19 chars) plus
+     * any value via RPC.  Pre-populate the store directly instead.
+     */
+    const char *key = "behavior/local_id/0";
+    const char val[] = "my_bhv";
+    if (settings_save_one(key, val, sizeof(val) - 1) != 0) {
+        return false;
+    }
+
+    /* ReadRequest with this key encodes to 23 bytes, which fits the 25-byte cap. */
+    zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
+    req.which_request_type = zmk_setting_expose_Request_read_tag;
+    strncpy(req.request_type.read.key, key, sizeof(req.request_type.read.key) - 1);
+
+    uint8_t buf[128];
+    pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
+    if (!pb_encode(&s, zmk_setting_expose_Request_fields, &req)) {
+        return false;
+    }
+    zmk_setting_expose_Response resp = zmk_setting_expose_Response_init_zero;
+    if (!call_handler(sub, buf, s.bytes_written, &resp)) {
+        return false;
+    }
+    if (resp.which_response_type != zmk_setting_expose_Response_read_tag) {
+        return false;
+    }
+    return resp.response_type.read.which_typed_value ==
+           zmk_setting_expose_ReadResponse_string_value_tag;
+}
+
 static bool test_storage_info(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
     req.which_request_type = zmk_setting_expose_Request_storage_info_tag;
@@ -491,6 +524,7 @@ static int setting_expose_unit_tests(void) {
     RUN_TEST(delete, test_delete(sub));
     RUN_TEST(read_after_delete, test_read_after_delete(sub));
     RUN_TEST(empty_key_error, test_empty_key_error(sub));
+    RUN_TEST(prefix_type_match, test_prefix_type_match(sub));
     RUN_TEST(storage_info, test_storage_info(sub));
     RUN_TEST(gc, test_gc(sub));
     RUN_TEST(clear_all, test_clear_all(sub));

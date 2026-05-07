@@ -7,6 +7,7 @@ PASS: list
 PASS: delete
 PASS: read_after_delete
 PASS: empty_key_error
+PASS: prefix_type_match
 PASS: storage_info
 PASS: gc
 PASS: clear_all

@@ -40,15 +40,23 @@ STRUCT_SECTION_ITERABLE(zmk_setting_expose_entry, _zmk_setting_expose_sentinel) 
 };
 
 static enum zmk_setting_type find_type_for_key(const char *key) {
+    enum zmk_setting_type prefix_type = ZMK_SETTING_TYPE_BYTES;
+    bool prefix_found = false;
     STRUCT_SECTION_FOREACH(zmk_setting_expose_entry, entry) {
         if (entry->key == NULL) {
             continue; /* skip sentinel */
         }
-        if (strcmp(entry->key, key) == 0) {
-            return entry->type;
+        if (entry->is_prefix) {
+            size_t plen = strlen(entry->key);
+            if (strncmp(key, entry->key, plen) == 0) {
+                prefix_type = entry->type;
+                prefix_found = true;
+            }
+        } else if (strcmp(entry->key, key) == 0) {
+            return entry->type; /* exact match wins */
         }
     }
-    return ZMK_SETTING_TYPE_BYTES;
+    return prefix_found ? prefix_type : ZMK_SETTING_TYPE_BYTES;
 }
 
 /*
