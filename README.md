@@ -5,6 +5,8 @@
 
 This ZMK module exposes the Zephyr settings store (NVS key/value pairs) to a connected browser via the **unofficial** custom ZMK Studio RPC protocol. It lets you inspect, edit, or delete any persisted setting on your keyboard without reflashing firmware.
 
+![screenshot](./img/screenshot.png)
+
 ## Summary
 
 - **Firmware**: Custom Studio RPC handler (`src/studio/setting_expose_handler.c`)
@@ -14,26 +16,26 @@ This ZMK module exposes the Zephyr settings store (NVS key/value pairs) to a con
 
 ### Supported operations
 
-| Operation | Description |
-|-----------|-------------|
-| List | Enumerate all persisted settings with typed values |
-| Read | Read a single setting by key |
-| Write | Write (persist) a setting value |
-| Delete | Delete (reset) a setting by key |
+| Operation    | Description                                            |
+| ------------ | ------------------------------------------------------ |
+| List         | Enumerate all persisted settings with typed values     |
+| Read         | Read a single setting by key                           |
+| Write        | Write (persist) a setting value                        |
+| Delete       | Delete (reset) a setting by key                        |
 | Storage Info | Query NVS storage capacity (total / used / free bytes) |
-| GC | Trigger NVS garbage collection / sector compaction |
-| Clear All | Delete every persisted setting on the device |
+| GC           | Trigger NVS garbage collection / sector compaction     |
+| Clear All    | Delete every persisted setting on the device           |
 
 ### Type system
 
 Settings are displayed and edited with type-aware UIs. Firmware code annotates keys with a type via the `ZMK_SETTING_EXPOSE_REGISTER` macro (see [include/zmk/setting_expose.h](include/zmk/setting_expose.h)):
 
-| Type | Encoding | Web UI |
-|------|----------|--------|
-| `BYTES` (default) | raw bytes | hex string |
-| `INT32` | 4-byte little-endian | number input |
-| `BOOL` | 1 byte | `true`/`false` |
-| `STRING` | UTF-8 | text input |
+| Type              | Encoding             | Web UI         |
+| ----------------- | -------------------- | -------------- |
+| `BYTES` (default) | raw bytes            | hex string     |
+| `INT32`           | 4-byte little-endian | number input   |
+| `BOOL`            | 1 byte               | `true`/`false` |
+| `STRING`          | UTF-8                | text input     |
 
 Well-known ZMK settings (BLE profile, output transport, physical layout, behavior local IDs) are pre-registered in `src/zmk_known_settings.c`.
 
