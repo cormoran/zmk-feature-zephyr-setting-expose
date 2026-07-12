@@ -150,6 +150,41 @@ describe("SettingsSection Component", () => {
       expect(screen.getByText("true")).toBeInTheDocument(); // bool value
     });
 
+    it("should fetch multiple pages until has_more is false", async () => {
+      const page0 = encodeResponse({
+        list: {
+          entries: [{ key: "mymod/a", int32Value: 1 }],
+          nextOffset: 1,
+          hasMore: true,
+        },
+      });
+      const page1 = encodeResponse({
+        list: {
+          entries: [{ key: "mymod/b", int32Value: 2 }],
+          nextOffset: 2,
+          hasMore: false,
+        },
+      });
+
+      const user = await renderWithMocks();
+
+      mocks.call_rpc
+        .mockResolvedValueOnce({ custom: { call: { payload: page0 } } })
+        .mockResolvedValueOnce({ custom: { call: { payload: page1 } } })
+        .mockResolvedValueOnce({
+          custom: { call: { payload: noStorageInfoPayload } },
+        });
+
+      await user.click(screen.getByRole("button", { name: /Load Settings/i }));
+
+      // mymod/b only exists in the second page, so seeing it proves the UI
+      // followed has_more and issued a second list request.
+      await waitFor(() => {
+        expect(screen.getByText("mymod/a")).toBeInTheDocument();
+        expect(screen.getByText("mymod/b")).toBeInTheDocument();
+      });
+    });
+
     it("should sort and group settings by prefix", async () => {
       const payload = encodeResponse({
         list: {

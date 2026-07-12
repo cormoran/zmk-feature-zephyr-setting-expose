@@ -502,6 +502,85 @@ static bool test_clear_all(const struct zmk_rpc_custom_subsystem *sub) {
     }
 }
 
+static bool clear_all_via_rpc(const struct zmk_rpc_custom_subsystem *sub) {
+    zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
+    req.which_request_type = zmk_setting_expose_Request_clear_all_tag;
+
+    uint8_t buf[16];
+    pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
+    if (!pb_encode(&s, zmk_setting_expose_Request_fields, &req)) {
+        return false;
+    }
+    zmk_setting_expose_Response resp = zmk_setting_expose_Response_init_zero;
+    if (!call_handler(sub, buf, s.bytes_written, &resp)) {
+        return false;
+    }
+    return resp.which_response_type == zmk_setting_expose_Response_clear_all_tag;
+}
+
+/*
+ * Issue a list request for one page. entries is a callback field that
+ * call_handler does not decode, but the has_more / next_offset scalars are
+ * decoded normally, which is what the pagination test asserts on.
+ */
+static bool list_page(const struct zmk_rpc_custom_subsystem *sub, uint32_t offset, uint32_t limit,
+                      zmk_setting_expose_ListResponse *out_list) {
+    zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
+    req.which_request_type = zmk_setting_expose_Request_list_tag;
+    req.request_type.list.offset = offset;
+    req.request_type.list.limit = limit;
+
+    uint8_t buf[32];
+    pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
+    if (!pb_encode(&s, zmk_setting_expose_Request_fields, &req)) {
+        return false;
+    }
+    zmk_setting_expose_Response resp = zmk_setting_expose_Response_init_zero;
+    if (!call_handler(sub, buf, s.bytes_written, &resp)) {
+        return false;
+    }
+    if (resp.which_response_type != zmk_setting_expose_Response_list_tag) {
+        return false;
+    }
+    *out_list = resp.response_type.list;
+    return true;
+}
+
+static bool test_pagination(const struct zmk_rpc_custom_subsystem *sub) {
+    /* Start from a known-empty store so the entry count is deterministic. */
+    if (!clear_all_via_rpc(sub)) {
+        return false;
+    }
+    for (int i = 0; i < 5; i++) {
+        char key[] = "pg/0";
+        key[3] = (char)('0' + i);
+        uint8_t v = (uint8_t)i;
+        if (settings_save_one(key, &v, 1) != 0) {
+            return false;
+        }
+    }
+
+    zmk_setting_expose_ListResponse l = zmk_setting_expose_ListResponse_init_zero;
+
+    /* Page 0 (offset 0, limit 2): more remain, cursor advances to 2. */
+    if (!list_page(sub, 0, 2, &l) || !l.has_more || l.next_offset != 2) {
+        return false;
+    }
+    /* Page 1 (offset 2, limit 2): more remain, cursor advances to 4. */
+    if (!list_page(sub, 2, 2, &l) || !l.has_more || l.next_offset != 4) {
+        return false;
+    }
+    /* Page 2 (offset 4, limit 2): last page (1 entry), cursor at 5. */
+    if (!list_page(sub, 4, 2, &l) || l.has_more || l.next_offset != 5) {
+        return false;
+    }
+    /* limit 0 means "all remaining": one page, no more, cursor at 5. */
+    if (!list_page(sub, 0, 0, &l) || l.has_more || l.next_offset != 5) {
+        return false;
+    }
+    return true;
+}
+
 /* ---- Boot-time test runner ---------------------------------------------- */
 
 static int setting_expose_unit_tests(void) {
@@ -528,6 +607,7 @@ static int setting_expose_unit_tests(void) {
     RUN_TEST(storage_info, test_storage_info(sub));
     RUN_TEST(gc, test_gc(sub));
     RUN_TEST(clear_all, test_clear_all(sub));
+    RUN_TEST(pagination, test_pagination(sub));
 
     LOG_INF("setting_expose_test: done");
     return 0;

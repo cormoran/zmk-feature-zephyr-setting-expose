@@ -111,12 +111,28 @@ function groupByPrefix(entries: SettingEntry[]): [string, SettingEntry[]][] {
 
 // ---- RPC helpers ----------------------------------------------------------
 
+/**
+ * Per-call RPC timeout. The default in the client library is 5s, which is too
+ * short for slow transports (BLE) or devices with many settings. Give every
+ * call a generous ceiling so a large transfer completes instead of timing out.
+ */
+const RPC_TIMEOUT_MS = 20000;
+
+/** Number of entries to request per list page. */
+const LIST_PAGE_SIZE = 32;
+
+/** Hard cap on list pages to avoid an infinite loop on a misbehaving device. */
+const MAX_LIST_PAGES = 10000;
+
 async function callRPC(
   service: ZMKCustomSubsystem,
-  request: Request
+  request: Request,
+  options?: { timeout?: number }
 ): Promise<Response> {
   const payload = Request.encode(request).finish();
-  const responsePayload = await service.callRPC(payload);
+  const responsePayload = await service.callRPC(payload, {
+    timeout: options?.timeout ?? RPC_TIMEOUT_MS,
+  });
   if (!responsePayload) {
     throw new Error("No response from device");
   }
@@ -236,11 +252,32 @@ export function SettingsSection() {
     setIsLoading(true);
     setError(null);
     try {
-      const resp = await callRPC(service, Request.create({ list: {} }));
-      if (resp.error) {
-        setError(`Device error: ${resp.error.message}`);
-      } else if (resp.list) {
-        setSettings(resp.list.entries);
+      /*
+       * Fetch settings one page at a time. A single response carrying every
+       * setting is slow to stream over the RPC transport and makes the client
+       * time out once there are many entries; paginating keeps each call small
+       * and lets us render progressively as pages arrive.
+       */
+      const collected: SettingEntry[] = [];
+      let offset = 0;
+      for (let page = 0; page < MAX_LIST_PAGES; page++) {
+        const resp = await callRPC(
+          service,
+          Request.create({ list: { offset, limit: LIST_PAGE_SIZE } })
+        );
+        if (resp.error) {
+          setError(`Device error: ${resp.error.message}`);
+          break;
+        }
+        if (!resp.list) {
+          break;
+        }
+        collected.push(...resp.list.entries);
+        setSettings([...collected]);
+        if (!resp.list.hasMore || resp.list.entries.length === 0) {
+          break;
+        }
+        offset = resp.list.nextOffset || offset + resp.list.entries.length;
       }
     } catch (e) {
       setError(

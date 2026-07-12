@@ -18,7 +18,7 @@ This ZMK module exposes the Zephyr settings store (NVS key/value pairs) to a con
 
 | Operation    | Description                                            |
 | ------------ | ------------------------------------------------------ |
-| List         | Enumerate all persisted settings with typed values     |
+| List         | Enumerate persisted settings with typed values (paged) |
 | Read         | Read a single setting by key                           |
 | Write        | Write (persist) a setting value                        |
 | Delete       | Delete (reset) a setting by key                        |
@@ -38,6 +38,15 @@ Settings are displayed and edited with type-aware UIs. Firmware code annotates k
 | `STRING`          | UTF-8                | text input     |
 
 Well-known ZMK settings (BLE profile, output transport, physical layout, behavior local IDs) are pre-registered in `src/zmk_known_settings.c`.
+
+### Loading many settings
+
+The RPC transport is comparatively slow (especially over BLE), so returning every
+setting in one response can exceed the client's request timeout on devices with a
+lot of stored settings. To avoid this, `List` is **paginated**: `ListRequest`
+carries an `offset`/`limit` and `ListResponse` reports `next_offset`/`has_more`.
+The Web UI fetches successive pages until `has_more` is false and renders entries
+progressively, so loading scales to any number of settings without timing out.
 
 ## Module User Guide
 
