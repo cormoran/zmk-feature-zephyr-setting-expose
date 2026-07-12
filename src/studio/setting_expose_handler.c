@@ -174,9 +174,26 @@ static int write_request_to_raw(const zmk_setting_expose_WriteRequest *req, uint
 
 /* ---- List handler ------------------------------------------------------- */
 
+/*
+ * Pagination parameters for the current list request. The list response is
+ * encoded lazily (FT_CALLBACK) after handle_list_request returns, so these
+ * must outlive the handler call -- a single request is in flight at a time,
+ * matching the shared static response buffer, so file scope is safe.
+ */
+static struct list_req_params {
+    uint32_t offset;
+    uint32_t limit;
+    zmk_setting_expose_ListResponse *out;
+} list_params;
+
 struct list_encode_ctx {
     pb_ostream_t *stream;
     const pb_field_t *field;
+    uint32_t offset;  /* skip entries with index < offset */
+    uint32_t limit;   /* stop after this many encoded; 0 = unlimited */
+    uint32_t seen;    /* running index of the entry being visited */
+    uint32_t encoded; /* entries encoded into this page */
+    bool has_more;    /* at least one entry exists beyond this page */
     int error;
 };
 
@@ -186,6 +203,20 @@ static int settings_list_cb(const char *key, size_t len, settings_read_cb read_c
 
     if (ctx->error) {
         return -ctx->error;
+    }
+
+    uint32_t idx = ctx->seen++;
+
+    /* Entries before the requested page: count but do not encode. */
+    if (idx < ctx->offset) {
+        return 0;
+    }
+
+    /* Page is full: note that more entries remain and keep iterating cheaply
+     * (without reading their values) so has_more is accurate. */
+    if (ctx->limit != 0 && ctx->encoded >= ctx->limit) {
+        ctx->has_more = true;
+        return 0;
     }
 
     zmk_setting_expose_SettingEntry entry = zmk_setting_expose_SettingEntry_init_zero;
@@ -209,6 +240,7 @@ static int settings_list_cb(const char *key, size_t len, settings_read_cb read_c
         return -EIO;
     }
 
+    ctx->encoded++;
     return 0;
 }
 
@@ -216,18 +248,37 @@ static bool encode_list_entries(pb_ostream_t *stream, const pb_field_t *field, v
     struct list_encode_ctx ctx = {
         .stream = stream,
         .field = field,
+        .offset = list_params.offset,
+        .limit = list_params.limit,
+        .seen = 0,
+        .encoded = 0,
+        .has_more = false,
         .error = 0,
     };
     settings_load_subtree_direct(NULL, settings_list_cb, &ctx);
+
+    /*
+     * Report pagination cursor + has_more. entries is proto field 1, so this
+     * callback runs before next_offset (2) / has_more (3) are encoded in the
+     * same pass -- both the size pass and the real encode pass see up-to-date
+     * values.
+     */
+    if (list_params.out != NULL) {
+        list_params.out->next_offset = ctx.offset + ctx.encoded;
+        list_params.out->has_more = ctx.has_more;
+    }
     return ctx.error == 0;
 }
 
 static int handle_list_request(const zmk_setting_expose_ListRequest *req,
                                zmk_setting_expose_Response *resp) {
-    (void)req;
     resp->which_response_type = zmk_setting_expose_Response_list_tag;
     resp->response_type.list.entries.funcs.encode = encode_list_entries;
     resp->response_type.list.entries.arg = NULL;
+
+    list_params.offset = req->offset;
+    list_params.limit = req->limit;
+    list_params.out = &resp->response_type.list;
     return 0;
 }
 

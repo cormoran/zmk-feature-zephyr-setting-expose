@@ -13,10 +13,22 @@ message SettingEntry {
     }
 }
 
-// List all persisted settings.
-message ListRequest {}
+// List persisted settings.
+//
+// Results are paginated so that a device with many settings does not have to
+// stream one huge response (which is slow over the RPC transport and can make
+// the client time out). The client fetches successive pages until has_more is
+// false.
+message ListRequest {
+    uint32 offset = 1; // index of the first entry to return (0-based)
+    uint32 limit = 2;  // max entries to return; 0 means "all remaining"
+}
 
-message ListResponse { repeated SettingEntry entries = 1; }
+message ListResponse {
+    repeated SettingEntry entries = 1;
+    uint32 next_offset = 2; // offset to pass in the next ListRequest
+    bool has_more = 3;      // true if more entries remain beyond this page
+}
 
 // Read a single setting by key.
 message ReadRequest { string key = 1; }

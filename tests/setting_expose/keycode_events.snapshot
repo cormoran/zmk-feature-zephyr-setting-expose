@@ -11,4 +11,5 @@ PASS: prefix_type_match
 PASS: storage_info
 PASS: gc
 PASS: clear_all
+PASS: pagination
 done
