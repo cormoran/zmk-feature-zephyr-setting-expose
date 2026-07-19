@@ -40,25 +40,32 @@ This mirrors the proven request→relay→peripheral→reply→central→notify 
 
 ## Protocol (`proto/zmk/setting_expose/setting_expose.proto`)
 
-- `Request.target` (uint32) + `Request.req_id` (uint32). `req_id` is echoed in
-  every notification so the client can drop stale replies.
-- `AckResponse` (+ `Response.ack`): the immediate reply to a targeted request on
-  a split central (the real results follow as notifications). A build without
-  the relay returns the real `Response` instead, so the Web UI treats a
-  non-`ack` reply to a targeted request as a central-only fallback.
-- `Notification { source, req_id, oneof event }` — **type-safe**, no opaque
-  bytes. The `event` is one of:
-  - `SettingEntry entry` — one streamed `list` entry. A relayed `list` sends
-    **one entry per notification** (so the peripheral never buffers a page —
-    minimal RAM), terminated by `ListDone list_done`.
-  - `Response response` — the single result of any non-`list` op
-    (read/write/delete/storage_info/gc/clear_all/error).
-  - `Complete complete` — a `TARGET_ALL` delete/clear_all finished.
-  - `EntryTooLarge entry_too_large` — a `list` entry whose value did not fit one
-    relay frame (only reachable over the size-bounded split relay, never on the
-    central's stream-encoded synchronous path). Carries the key + value size so
-    the web shows the setting with a "value too large" marker and still allows
-    deleting it.
+The protocol is built around one value type and one flat result vocabulary,
+shared by the synchronous and asynchronous delivery paths.
+
+- **`SettingEntry { key, oneof typed_value }`** is the single key+value carrier —
+  a read result, the `write` op's payload, and each list entry are all a
+  `SettingEntry`. Its `typed_value` oneof adds `too_large` (a uint32 byte
+  length): a value that could not be streamed over the size-bounded split relay
+  arrives as a `SettingEntry` with `too_large` set, so the key is still known
+  (shown + deletable) while the value is absent. Only a peripheral produces it —
+  the central's synchronous path stream-encodes.
+- **Shared result pieces**: `Ok` (one success for write/delete/gc/clear_all,
+  replacing four empty messages), `Error`, `StorageInfo`.
+- `Request { target, req_id, oneof op }` where `op` is `List | Read |
+  SettingEntry write | Delete | GetStorageInfo | Gc | ClearAll`. `req_id` is
+  echoed in every notification so the client can drop stale replies.
+- **Synchronous** `Response { oneof result }` = `Error | Ack | ListPage |
+  SettingEntry entry | Ok | StorageInfo`. `Ack` is the immediate reply to a
+  targeted request (real results follow as notifications); a build without the
+  relay returns the real result instead, so the Web UI treats a non-`ack` reply
+  as a central-only fallback. `ListPage` (paged entries) exists only here.
+- **Asynchronous** `Notification { source, req_id, oneof event }` = `Error |
+  SettingEntry entry | ListDone | Ok | StorageInfo | Complete`. It shares the
+  same result vocabulary as `Response` (no nested `Response`), plus the
+  streaming markers: a `list` streams one `entry` per notification (so the
+  peripheral never buffers a page), terminated by `ListDone`; a `TARGET_ALL`
+  delete/clear_all ends with `Complete`.
 
 ## Firmware structure
 
@@ -81,9 +88,12 @@ This mirrors the proven request→relay→peripheral→reply→central→notify 
   work item between items yields the queue so the transport can drain.
   - Carriers `se_relay_query` ("SEq", central→peripheral, encoded Request) and
     `se_relay_reply` ("SEr", peripheral→central, encoded Notification event).
-  - Peripheral: a non-`list` request → `setting_expose_dispatch` → one
-    `Notification{response}` reply. A `list` → stream one `Notification{entry}`
-    per cycle via `setting_expose_entry_at`, then `Notification{list_done}`.
+  - Peripheral: a non-`list` request → `setting_expose_dispatch` → the flat
+    `Response.result` is mapped 1:1 into the matching `Notification` event
+    (`entry`/`ok`/`storage_info`/`error`) and sent as one reply. A `list` →
+    stream one `Notification{entry}` per cycle via `setting_expose_entry_at`,
+    then `Notification{list_done}`. If an entry does not fit the frame it is
+    re-sent as the same `entry` with a `too_large` value.
   - Central: decode each reply, stamp the real `source`, forward it — one
     notification per cycle — filtered by the pending request's target. The
     central's OWN store is read via the synchronous path (target 0), so there is
@@ -103,7 +113,7 @@ module defaults `DATA_LEN = 512`, which comfortably fits one entry (key + up to
 a 256-byte value + framing); the transport chunks a frame across the link
 automatically, and because a `list` streams one entry per reply no per-page
 buffer is ever allocated. If a value does not fit a (smaller) frame, the
-peripheral streams `entry_too_large` instead of dropping it.
+peripheral streams the entry with a `too_large` value instead of dropping it.
 `include/zmk/setting_expose/relay.h` `BUILD_ASSERT`s the header offset and a
 sane minimum size.
 

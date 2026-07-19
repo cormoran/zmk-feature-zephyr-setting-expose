@@ -154,11 +154,7 @@ describe("split target support", () => {
     await user.click(screen.getByRole("button", { name: /Load Settings/i }));
 
     emit(
-      notif({
-        source: 1,
-        reqId: 1,
-        entryTooLarge: { key: "big/blob", valueSize: 300 },
-      })
+      notif({ source: 1, reqId: 1, entry: { key: "big/blob", tooLarge: 300 } })
     );
     emit(notif({ source: 1, reqId: 1, listDone: {} }));
 
@@ -204,8 +200,8 @@ describe("split target support", () => {
       .mockResolvedValueOnce(rpcReply({ storageInfo: {} })); // refresh after clear
 
     await user.click(screen.getByRole("button", { name: /Clear All/i }));
-    // Peripheral deletes first, then the central completes the operation.
-    emit(notif({ source: 1, reqId: 1, response: { delete: {} } }));
+    // Peripheral deletes first (ok), then the central completes the operation.
+    emit(notif({ source: 1, reqId: 1, ok: {} }));
     emit(notif({ source: 0, reqId: 1, complete: {} }));
 
     await waitFor(() =>

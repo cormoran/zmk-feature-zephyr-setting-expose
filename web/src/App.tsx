@@ -12,7 +12,7 @@ import {
   Response,
   Notification,
   SettingEntry,
-  StorageInfoResponse,
+  StorageInfo,
 } from "./proto/zmk/setting_expose/setting_expose";
 
 export const SUBSYSTEM_IDENTIFIER = "zmk__setting_expose";
@@ -182,18 +182,19 @@ async function callRPC(
 }
 
 /**
- * A loaded setting. `tooLargeBytes` is set when a peripheral could not stream
- * the value over the split relay because it did not fit one frame -- the key is
- * still known (so it can be shown and deleted), but the value is unavailable.
+ * A setting whose value could not be streamed over the split relay (it did not
+ * fit one frame) arrives as a SettingEntry with `tooLarge` set to its byte
+ * length: the key is known (so it can be shown and deleted) but the value is
+ * unavailable. This only happens for a peripheral -- the central's synchronous
+ * path stream-encodes.
  */
-type LoadedEntry = SettingEntry & { tooLargeBytes?: number };
 
 /** Results gathered from the notifications of one targeted request. */
 type TargetedResult = {
   /** Streamed `list` entries, grouped by reply source. */
-  entriesBySource: Record<number, LoadedEntry[]>;
-  /** Single Response per source for non-list ops (read/write/delete/gc/...). */
-  responseBySource: Record<number, Response>;
+  entriesBySource: Record<number, SettingEntry[]>;
+  /** Error message per source, for any op that failed. */
+  errorBySource: Record<number, string>;
   /** A TARGET_ALL delete/clear_all reported completion. */
   completed: boolean;
 };
@@ -264,7 +265,7 @@ export function SettingsSection() {
   const zmkApp = useContext(ZMKAppContext);
   /* Loaded settings keyed by reply source (0 = central, 1.. = peripheral). */
   const [settingsBySource, setSettingsBySource] = useState<
-    Record<number, LoadedEntry[]>
+    Record<number, SettingEntry[]>
   >({});
   const [target, setTarget] = useState<number>(TARGET_CENTRAL);
   const [displayFilter, setDisplayFilter] = useState<DisplaySource>("all");
@@ -276,9 +277,7 @@ export function SettingsSection() {
   const [editValue, setEditValue] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [storageInfo, setStorageInfo] = useState<StorageInfoResponse | null>(
-    null
-  );
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [isGcing, setIsGcing] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
 
@@ -352,7 +351,7 @@ export function SettingsSection() {
       const reqId = nextReqId();
       const result: TargetedResult = {
         entriesBySource: {},
-        responseBySource: {},
+        errorBySource: {},
         completed: false,
       };
 
@@ -365,22 +364,26 @@ export function SettingsSection() {
         const timer = setTimeout(done, timeout);
         collectors.current.set(reqId, {
           onEvent: (source, n) => {
-            if (n.entry) {
+            if (n.error) result.errorBySource[source] = n.error.message;
+            /* `entry` is a streamed list item (list/collect) or a single read
+             * result (first). Streaming accumulates; a read resolves. */
+            if (n.entry && (mode === "list" || mode === "collect")) {
               (result.entriesBySource[source] ??= []).push(n.entry);
-            } else if (n.entryTooLarge) {
-              (result.entriesBySource[source] ??= []).push({
-                key: n.entryTooLarge.key,
-                tooLargeBytes: n.entryTooLarge.valueSize,
-              });
-            } else if (n.listDone) {
+            }
+            if (n.listDone) {
               result.entriesBySource[source] ??= [];
               if (mode === "list" && source === reqTarget) done();
-            } else if (n.response) {
-              result.responseBySource[source] = n.response;
-              if (mode === "first") done();
-            } else if (n.complete) {
+            }
+            if (n.complete) {
               result.completed = true;
               if (mode === "complete") done();
+            }
+            /* One addressed half: resolve on its single result event. */
+            if (
+              mode === "first" &&
+              (n.entry || n.ok || n.error || n.storageInfo)
+            ) {
+              done();
             }
           },
         });
@@ -394,7 +397,7 @@ export function SettingsSection() {
       if (ack.ack === undefined) {
         /* Central-only fallback (or an error): the sync response IS the result. */
         collectors.current.delete(reqId);
-        result.responseBySource[0] = ack;
+        if (ack.error) result.errorBySource[0] = ack.error.message;
         if (ack.list) result.entriesBySource[0] = ack.list.entries;
         return result;
       }
@@ -453,7 +456,7 @@ export function SettingsSection() {
   const loadPeripheralEntries = async (
     service: ZMKCustomSubsystem,
     source: number
-  ): Promise<LoadedEntry[] | { error: string } | null> => {
+  ): Promise<SettingEntry[] | { error: string } | null> => {
     const r = await sendTargeted(
       service,
       { list: { offset: 0, limit: 0 } },
@@ -461,8 +464,7 @@ export function SettingsSection() {
       "list",
       NOTIFY_ONE_MS
     );
-    const err = r.responseBySource[source]?.error;
-    if (err) return { error: err.message };
+    if (r.errorBySource[source]) return { error: r.errorBySource[source] };
     if (r.entriesBySource[source]) return r.entriesBySource[source];
     return null; // no reply (e.g. disconnected peripheral)
   };
@@ -600,7 +602,7 @@ export function SettingsSection() {
           "first",
           NOTIFY_ONE_MS
         );
-        deviceError = r.responseBySource[source]?.error?.message;
+        deviceError = r.errorBySource[source];
       }
       if (deviceError) {
         setEditError(`Device error: ${deviceError}`);
@@ -641,9 +643,8 @@ export function SettingsSection() {
           "first",
           NOTIFY_ONE_MS
         );
-        const err = r.responseBySource[source]?.error;
-        if (err) {
-          setError(`Delete failed: ${err.message}`);
+        if (r.errorBySource[source]) {
+          setError(`Delete failed: ${r.errorBySource[source]}`);
           return;
         }
       }
@@ -938,14 +939,14 @@ export function SettingsSection() {
                         >
                           <td className="key-cell">{entry.key}</td>
                           <td className="value-cell">
-                            {entry.tooLargeBytes !== undefined ? (
+                            {entry.tooLarge !== undefined ? (
                               <span
                                 className="value-too-large"
                                 title="This value is too large to transfer over the split link. It cannot be shown or edited here, but you can still delete the setting."
                               >
                                 ⚠️ value too large to transfer
-                                {entry.tooLargeBytes > 0
-                                  ? ` (${entry.tooLargeBytes} bytes)`
+                                {entry.tooLarge > 0
+                                  ? ` (${entry.tooLarge} bytes)`
                                   : ""}
                               </span>
                             ) : (
@@ -953,16 +954,16 @@ export function SettingsSection() {
                             )}
                           </td>
                           <td>
-                            {entry.tooLargeBytes !== undefined
+                            {entry.tooLarge !== undefined
                               ? "—"
                               : typedValueLabel(entry)}
                           </td>
                           <td>
                             <button
                               className="btn btn-secondary btn-small"
-                              disabled={entry.tooLargeBytes !== undefined}
+                              disabled={entry.tooLarge !== undefined}
                               title={
-                                entry.tooLargeBytes !== undefined
+                                entry.tooLarge !== undefined
                                   ? "Value unavailable (too large to transfer)"
                                   : undefined
                               }

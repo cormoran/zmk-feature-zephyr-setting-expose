@@ -59,12 +59,9 @@ static enum zmk_setting_type find_type_for_key(const char *key) {
     return prefix_found ? prefix_type : ZMK_SETTING_TYPE_BYTES;
 }
 
-/*
- * Fill the typed_value oneof in a SettingEntry from raw bytes + type hint.
- */
-static void fill_setting_entry_typed_value(zmk_setting_expose_SettingEntry *entry,
-                                           const uint8_t *raw, size_t len,
-                                           enum zmk_setting_type type) {
+/* Fill the typed_value oneof of a SettingEntry from raw bytes + a type hint. */
+static void fill_entry_value(zmk_setting_expose_SettingEntry *entry, const uint8_t *raw, size_t len,
+                             enum zmk_setting_type type) {
     switch (type) {
     case ZMK_SETTING_TYPE_INT32:
         if (len >= 4) {
@@ -100,91 +97,55 @@ static void fill_setting_entry_typed_value(zmk_setting_expose_SettingEntry *entr
 }
 
 /*
- * Fill the typed_value oneof in a ReadResponse from raw bytes + type hint.
- * Same logic as fill_setting_entry_typed_value but for ReadResponse struct.
+ * Serialize a SettingEntry's typed value to raw bytes for settings_save_one.
+ * Returns the byte count, or a negative errno.
  */
-static void fill_read_response_typed_value(zmk_setting_expose_ReadResponse *out, const uint8_t *raw,
-                                           size_t len, enum zmk_setting_type type) {
-    switch (type) {
-    case ZMK_SETTING_TYPE_INT32:
-        if (len >= 4) {
-            int32_t v;
-            memcpy(&v, raw, 4);
-            out->which_typed_value = zmk_setting_expose_ReadResponse_int32_value_tag;
-            out->typed_value.int32_value = v;
-            return;
-        }
-        break;
-    case ZMK_SETTING_TYPE_BOOL:
-        if (len >= 1) {
-            out->which_typed_value = zmk_setting_expose_ReadResponse_bool_value_tag;
-            out->typed_value.bool_value = raw[0] != 0;
-            return;
-        }
-        break;
-    case ZMK_SETTING_TYPE_STRING: {
-        size_t copy = MIN(len, sizeof(out->typed_value.string_value) - 1);
-        out->which_typed_value = zmk_setting_expose_ReadResponse_string_value_tag;
-        memcpy(out->typed_value.string_value, raw, copy);
-        out->typed_value.string_value[copy] = '\0';
-        return;
-    }
-    default:
-        break;
-    }
-    size_t copy = MIN(len, sizeof(out->typed_value.bytes_value.bytes));
-    out->which_typed_value = zmk_setting_expose_ReadResponse_bytes_value_tag;
-    memcpy(out->typed_value.bytes_value.bytes, raw, copy);
-    out->typed_value.bytes_value.size = (pb_size_t)copy;
-}
-
-/*
- * Convert a WriteRequest typed_value oneof to raw bytes for settings_save_one.
- * Returns the number of bytes written to buf, or -1 on error.
- */
-static int write_request_to_raw(const zmk_setting_expose_WriteRequest *req, uint8_t *buf,
-                                size_t buf_size) {
-    switch (req->which_typed_value) {
-    case zmk_setting_expose_WriteRequest_int32_value_tag:
+static int entry_value_to_raw(const zmk_setting_expose_SettingEntry *entry, uint8_t *buf,
+                              size_t buf_size) {
+    switch (entry->which_typed_value) {
+    case zmk_setting_expose_SettingEntry_int32_value_tag:
         if (buf_size < 4) {
             return -ENOBUFS;
         }
-        memcpy(buf, &req->typed_value.int32_value, 4);
+        memcpy(buf, &entry->typed_value.int32_value, 4);
         return 4;
-    case zmk_setting_expose_WriteRequest_bool_value_tag:
+    case zmk_setting_expose_SettingEntry_bool_value_tag:
         if (buf_size < 1) {
             return -ENOBUFS;
         }
-        buf[0] = req->typed_value.bool_value ? 1 : 0;
+        buf[0] = entry->typed_value.bool_value ? 1 : 0;
         return 1;
-    case zmk_setting_expose_WriteRequest_string_value_tag: {
-        size_t len = strnlen(req->typed_value.string_value, sizeof(req->typed_value.string_value));
+    case zmk_setting_expose_SettingEntry_string_value_tag: {
+        size_t len =
+            strnlen(entry->typed_value.string_value, sizeof(entry->typed_value.string_value));
         size_t copy = MIN(len, buf_size);
-        memcpy(buf, req->typed_value.string_value, copy);
+        memcpy(buf, entry->typed_value.string_value, copy);
         return (int)copy;
     }
-    default: /* bytes */
-        if (buf_size < req->typed_value.bytes_value.size) {
+    case zmk_setting_expose_SettingEntry_bytes_value_tag:
+        if (buf_size < entry->typed_value.bytes_value.size) {
             return -ENOBUFS;
         }
-        memcpy(buf, req->typed_value.bytes_value.bytes, req->typed_value.bytes_value.size);
-        return (int)req->typed_value.bytes_value.size;
+        memcpy(buf, entry->typed_value.bytes_value.bytes, entry->typed_value.bytes_value.size);
+        return (int)entry->typed_value.bytes_value.size;
+    default:
+        return -EINVAL; /* e.g. too_large: not a writable value */
     }
 }
 
 /* ---- List handler ------------------------------------------------------- */
 
 /*
- * Pagination parameters for the current list request. The list response is
- * encoded lazily (FT_CALLBACK) after handle_list_request returns, so these
- * must outlive the handler call -- a single request is in flight at a time
- * (RPCs are serialized; the relay answer path is single-threaded), matching
- * the shared static response buffer, so file scope is safe.
+ * Pagination parameters for the current list request. The list is encoded
+ * lazily (FT_CALLBACK) after the handler returns, so these must outlive the
+ * handler call -- a single request is in flight at a time (RPCs are serialized;
+ * the relay answer path is single-threaded), matching the shared static
+ * response buffer, so file scope is safe.
  */
 static struct list_req_params {
     uint32_t offset;
     uint32_t limit;
-    zmk_setting_expose_ListResponse *out;
+    zmk_setting_expose_ListPage *out;
 } list_params;
 
 struct list_encode_ctx {
@@ -221,7 +182,6 @@ static int settings_list_cb(const char *key, size_t len, settings_read_cb read_c
     }
 
     zmk_setting_expose_SettingEntry entry = zmk_setting_expose_SettingEntry_init_zero;
-
     strncpy(entry.key, key, sizeof(entry.key) - 1);
 
     uint8_t raw[256];
@@ -230,9 +190,7 @@ static int settings_list_cb(const char *key, size_t len, settings_read_cb read_c
         LOG_WRN("Failed to read value for key %s: %d", key, (int)read_len);
         read_len = 0;
     }
-
-    enum zmk_setting_type type = find_type_for_key(key);
-    fill_setting_entry_typed_value(&entry, raw, (size_t)read_len, type);
+    fill_entry_value(&entry, raw, (size_t)read_len, find_type_for_key(key));
 
     if (!pb_encode_tag_for_field(ctx->stream, ctx->field) ||
         !pb_encode_submessage(ctx->stream, zmk_setting_expose_SettingEntry_fields, &entry)) {
@@ -271,15 +229,14 @@ static bool encode_list_entries(pb_ostream_t *stream, const pb_field_t *field, v
     return ctx.error == 0;
 }
 
-static int handle_list_request(const zmk_setting_expose_ListRequest *req,
-                               zmk_setting_expose_Response *resp) {
-    resp->which_response_type = zmk_setting_expose_Response_list_tag;
-    resp->response_type.list.entries.funcs.encode = encode_list_entries;
-    resp->response_type.list.entries.arg = NULL;
+static int handle_list(const zmk_setting_expose_List *req, zmk_setting_expose_Response *resp) {
+    resp->which_result = zmk_setting_expose_Response_list_tag;
+    resp->result.list.entries.funcs.encode = encode_list_entries;
+    resp->result.list.entries.arg = NULL;
 
     list_params.offset = req->offset;
     list_params.limit = req->limit;
-    list_params.out = &resp->response_type.list;
+    list_params.out = &resp->result.list;
     return 0;
 }
 
@@ -308,7 +265,7 @@ static int entry_at_cb(const char *key, size_t len, settings_read_cb read_cb, vo
         LOG_WRN("Failed to read value for key %s: %d", key, (int)read_len);
         read_len = 0;
     }
-    fill_setting_entry_typed_value(ctx->out, raw, (size_t)read_len, find_type_for_key(key));
+    fill_entry_value(ctx->out, raw, (size_t)read_len, find_type_for_key(key));
     ctx->found = true;
     return 1; /* stop iteration early once the target is emitted */
 }
@@ -322,8 +279,7 @@ int setting_expose_entry_at(uint32_t index, zmk_setting_expose_SettingEntry *out
 /* ---- Read handler ------------------------------------------------------- */
 
 struct read_cb_ctx {
-    const char *key;
-    zmk_setting_expose_ReadResponse *out;
+    zmk_setting_expose_SettingEntry *out;
     enum zmk_setting_type type;
     bool found;
 };
@@ -331,40 +287,30 @@ struct read_cb_ctx {
 static int settings_read_direct_cb(const char *key, size_t len, settings_read_cb read_cb,
                                    void *cb_arg, void *param) {
     struct read_cb_ctx *ctx = (struct read_cb_ctx *)param;
-
-    /* settings_load_subtree_direct strips the subtree prefix from key.
-     * When loading with the full key as subtree, key should be empty string. */
-    (void)key;
+    (void)key; /* full key was the subtree; stripped key is empty */
 
     uint8_t raw[256];
     ssize_t read_len = read_cb(cb_arg, raw, sizeof(raw));
     if (read_len < 0) {
-        LOG_WRN("Failed to read value for key %s: %d", ctx->key, (int)read_len);
+        LOG_WRN("Failed to read setting value: %d", (int)read_len);
         read_len = 0;
     }
-
-    fill_read_response_typed_value(ctx->out, raw, (size_t)read_len, ctx->type);
+    fill_entry_value(ctx->out, raw, (size_t)read_len, ctx->type);
     ctx->found = true;
     return 0;
 }
 
-static int handle_read_request(const zmk_setting_expose_ReadRequest *req,
-                               zmk_setting_expose_Response *resp) {
+static int handle_read(const zmk_setting_expose_Read *req, zmk_setting_expose_Response *resp) {
     if (strlen(req->key) == 0) {
         LOG_WRN("Read request with empty key");
         return -EINVAL;
     }
 
-    zmk_setting_expose_ReadResponse *out = &resp->response_type.read;
+    zmk_setting_expose_SettingEntry *out = &resp->result.entry;
+    *out = (zmk_setting_expose_SettingEntry)zmk_setting_expose_SettingEntry_init_zero;
     strncpy(out->key, req->key, sizeof(out->key) - 1);
 
-    struct read_cb_ctx ctx = {
-        .key = req->key,
-        .out = out,
-        .type = find_type_for_key(req->key),
-        .found = false,
-    };
-
+    struct read_cb_ctx ctx = {.out = out, .type = find_type_for_key(req->key), .found = false};
     settings_load_subtree_direct(req->key, settings_read_direct_cb, &ctx);
 
     if (!ctx.found) {
@@ -372,41 +318,40 @@ static int handle_read_request(const zmk_setting_expose_ReadRequest *req,
         return -ENOENT;
     }
 
-    resp->which_response_type = zmk_setting_expose_Response_read_tag;
+    resp->which_result = zmk_setting_expose_Response_entry_tag;
     return 0;
 }
 
 /* ---- Write handler ------------------------------------------------------ */
 
-static int handle_write_request(const zmk_setting_expose_WriteRequest *req,
-                                zmk_setting_expose_Response *resp) {
-    if (strlen(req->key) == 0) {
+static int handle_write(const zmk_setting_expose_SettingEntry *entry,
+                        zmk_setting_expose_Response *resp) {
+    if (strlen(entry->key) == 0) {
         LOG_WRN("Write request with empty key");
         return -EINVAL;
     }
 
     uint8_t raw[256];
-    int raw_len = write_request_to_raw(req, raw, sizeof(raw));
+    int raw_len = entry_value_to_raw(entry, raw, sizeof(raw));
     if (raw_len < 0) {
-        LOG_WRN("Failed to convert write request for key %s: %d", req->key, raw_len);
+        LOG_WRN("Invalid write value for key %s: %d", entry->key, raw_len);
         return raw_len;
     }
 
-    int rc = settings_save_one(req->key, raw, (size_t)raw_len);
+    int rc = settings_save_one(entry->key, raw, (size_t)raw_len);
     if (rc != 0) {
-        LOG_WRN("Failed to save setting %s: %d", req->key, rc);
+        LOG_WRN("Failed to save setting %s: %d", entry->key, rc);
         return rc;
     }
 
-    LOG_DBG("Saved setting: %s (%d bytes)", req->key, raw_len);
-    resp->which_response_type = zmk_setting_expose_Response_write_tag;
+    LOG_DBG("Saved setting: %s (%d bytes)", entry->key, raw_len);
+    resp->which_result = zmk_setting_expose_Response_ok_tag;
     return 0;
 }
 
 /* ---- Delete handler ----------------------------------------------------- */
 
-static int handle_delete_request(const zmk_setting_expose_DeleteRequest *req,
-                                 zmk_setting_expose_Response *resp) {
+static int handle_delete(const zmk_setting_expose_Delete *req, zmk_setting_expose_Response *resp) {
     if (strlen(req->key) == 0) {
         LOG_WRN("Delete request with empty key");
         return -EINVAL;
@@ -419,17 +364,18 @@ static int handle_delete_request(const zmk_setting_expose_DeleteRequest *req,
     }
 
     LOG_DBG("Deleted setting: %s", req->key);
-    resp->which_response_type = zmk_setting_expose_Response_delete_tag;
+    resp->which_result = zmk_setting_expose_Response_ok_tag;
     return 0;
 }
 
 /* ---- Storage info handler ----------------------------------------------- */
 
-static int handle_storage_info_request(const zmk_setting_expose_StorageInfoRequest *req,
-                                       zmk_setting_expose_Response *resp) {
+static int handle_storage_info(const zmk_setting_expose_GetStorageInfo *req,
+                               zmk_setting_expose_Response *resp) {
     (void)req;
 
-    zmk_setting_expose_StorageInfoResponse *out = &resp->response_type.storage_info;
+    zmk_setting_expose_StorageInfo *out = &resp->result.storage_info;
+    *out = (zmk_setting_expose_StorageInfo)zmk_setting_expose_StorageInfo_init_zero;
 
 #ifdef CONFIG_SETTINGS_NVS
     void *storage = NULL;
@@ -442,18 +388,16 @@ static int handle_storage_info_request(const zmk_setting_expose_StorageInfoReque
             out->free_bytes = (uint32_t)free_sz;
             out->used_bytes = total > (uint32_t)free_sz ? total - (uint32_t)free_sz : 0;
         }
-        /* NVS does not directly expose garbage size; leave as 0 */
     }
 #endif
 
-    resp->which_response_type = zmk_setting_expose_Response_storage_info_tag;
+    resp->which_result = zmk_setting_expose_Response_storage_info_tag;
     return 0;
 }
 
 /* ---- GC handler --------------------------------------------------------- */
 
-static int handle_gc_request(const zmk_setting_expose_GcRequest *req,
-                             zmk_setting_expose_Response *resp) {
+static int handle_gc(const zmk_setting_expose_Gc *req, zmk_setting_expose_Response *resp) {
     (void)req;
 
 #ifdef CONFIG_SETTINGS_NVS
@@ -467,7 +411,7 @@ static int handle_gc_request(const zmk_setting_expose_GcRequest *req,
     }
 #endif
 
-    resp->which_response_type = zmk_setting_expose_Response_gc_tag;
+    resp->which_result = zmk_setting_expose_Response_ok_tag;
     return 0;
 }
 
@@ -498,8 +442,8 @@ static int collect_key_cb(const char *key, size_t len, settings_read_cb read_cb,
     return 0;
 }
 
-static int handle_clear_all_request(const zmk_setting_expose_ClearAllRequest *req,
-                                    zmk_setting_expose_Response *resp) {
+static int handle_clear_all(const zmk_setting_expose_ClearAll *req,
+                            zmk_setting_expose_Response *resp) {
     (void)req;
 
     /* Iterate in batches to avoid unbounded stack usage. */
@@ -513,7 +457,7 @@ static int handle_clear_all_request(const zmk_setting_expose_ClearAllRequest *re
     } while (_clear_all_count > 0 && safety > 0);
 
     LOG_DBG("clear_all: finished");
-    resp->which_response_type = zmk_setting_expose_Response_clear_all_tag;
+    resp->which_result = zmk_setting_expose_Response_ok_tag;
     return 0;
 }
 
@@ -521,23 +465,23 @@ static int handle_clear_all_request(const zmk_setting_expose_ClearAllRequest *re
 
 int setting_expose_dispatch(const zmk_setting_expose_Request *req,
                             zmk_setting_expose_Response *resp) {
-    switch (req->which_request_type) {
+    switch (req->which_op) {
     case zmk_setting_expose_Request_list_tag:
-        return handle_list_request(&req->request_type.list, resp);
+        return handle_list(&req->op.list, resp);
     case zmk_setting_expose_Request_read_tag:
-        return handle_read_request(&req->request_type.read, resp);
+        return handle_read(&req->op.read, resp);
     case zmk_setting_expose_Request_write_tag:
-        return handle_write_request(&req->request_type.write, resp);
+        return handle_write(&req->op.write, resp);
     case zmk_setting_expose_Request_delete_tag:
-        return handle_delete_request(&req->request_type.delete, resp);
+        return handle_delete(&req->op.delete, resp);
     case zmk_setting_expose_Request_storage_info_tag:
-        return handle_storage_info_request(&req->request_type.storage_info, resp);
+        return handle_storage_info(&req->op.storage_info, resp);
     case zmk_setting_expose_Request_gc_tag:
-        return handle_gc_request(&req->request_type.gc, resp);
+        return handle_gc(&req->op.gc, resp);
     case zmk_setting_expose_Request_clear_all_tag:
-        return handle_clear_all_request(&req->request_type.clear_all, resp);
+        return handle_clear_all(&req->op.clear_all, resp);
     default:
-        LOG_WRN("Unsupported setting_expose request type: %d", req->which_request_type);
+        LOG_WRN("Unsupported setting_expose request op: %d", req->which_op);
         return -ENOTSUP;
     }
 }

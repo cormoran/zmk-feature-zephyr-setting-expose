@@ -46,10 +46,10 @@ static bool setting_expose_rpc_handle_request(const zmk_custom_CallRequest *raw_
         pb_istream_from_buffer(raw_request->payload.bytes, raw_request->payload.size);
     if (!pb_decode(&req_stream, zmk_setting_expose_Request_fields, &req)) {
         LOG_WRN("Failed to decode setting_expose request: %s", PB_GET_ERROR(&req_stream));
-        zmk_setting_expose_ErrorResponse err = zmk_setting_expose_ErrorResponse_init_zero;
+        zmk_setting_expose_Error err = zmk_setting_expose_Error_init_zero;
         snprintf(err.message, sizeof(err.message), "Failed to decode request");
-        resp->which_response_type = zmk_setting_expose_Response_error_tag;
-        resp->response_type.error = err;
+        resp->which_result = zmk_setting_expose_Response_error_tag;
+        resp->result.error = err;
         return true;
     }
 
@@ -75,10 +75,10 @@ static bool setting_expose_rpc_handle_request(const zmk_custom_CallRequest *raw_
     }
 
     if (rc != 0) {
-        zmk_setting_expose_ErrorResponse err = zmk_setting_expose_ErrorResponse_init_zero;
+        zmk_setting_expose_Error err = zmk_setting_expose_Error_init_zero;
         snprintf(err.message, sizeof(err.message), "Error: %d", rc);
-        resp->which_response_type = zmk_setting_expose_Response_error_tag;
-        resp->response_type.error = err;
+        resp->which_result = zmk_setting_expose_Response_error_tag;
+        resp->result.error = err;
     }
     return true;
 }

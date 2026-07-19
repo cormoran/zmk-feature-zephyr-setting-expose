@@ -231,12 +231,12 @@ static bool test_subsystem_found(void) { return find_subsystem() != NULL; }
 
 static bool test_write(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_write_tag;
-    strncpy(req.request_type.write.key, TEST_KEY, sizeof(req.request_type.write.key) - 1);
-    req.request_type.write.which_typed_value = zmk_setting_expose_WriteRequest_bytes_value_tag;
+    req.which_op = zmk_setting_expose_Request_write_tag;
+    strncpy(req.op.write.key, TEST_KEY, sizeof(req.op.write.key) - 1);
+    req.op.write.which_typed_value = zmk_setting_expose_SettingEntry_bytes_value_tag;
     const uint8_t val[] = {0xDE, 0xAD, 0xBE, 0xEF};
-    memcpy(req.request_type.write.typed_value.bytes_value.bytes, val, sizeof(val));
-    req.request_type.write.typed_value.bytes_value.size = sizeof(val);
+    memcpy(req.op.write.typed_value.bytes_value.bytes, val, sizeof(val));
+    req.op.write.typed_value.bytes_value.size = sizeof(val);
 
     uint8_t buf[128];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -248,15 +248,15 @@ static bool test_write(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_write_tag;
+    return resp.which_result == zmk_setting_expose_Response_ok_tag;
 }
 
 static bool test_write_int32(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_write_tag;
-    strncpy(req.request_type.write.key, "t/i32", sizeof(req.request_type.write.key) - 1);
-    req.request_type.write.which_typed_value = zmk_setting_expose_WriteRequest_int32_value_tag;
-    req.request_type.write.typed_value.int32_value = 42;
+    req.which_op = zmk_setting_expose_Request_write_tag;
+    strncpy(req.op.write.key, "t/i32", sizeof(req.op.write.key) - 1);
+    req.op.write.which_typed_value = zmk_setting_expose_SettingEntry_int32_value_tag;
+    req.op.write.typed_value.int32_value = 42;
 
     uint8_t buf[128];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -268,13 +268,13 @@ static bool test_write_int32(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_write_tag;
+    return resp.which_result == zmk_setting_expose_Response_ok_tag;
 }
 
 static bool test_read(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_read_tag;
-    strncpy(req.request_type.read.key, TEST_KEY, sizeof(req.request_type.read.key) - 1);
+    req.which_op = zmk_setting_expose_Request_read_tag;
+    strncpy(req.op.read.key, TEST_KEY, sizeof(req.op.read.key) - 1);
 
     uint8_t buf[128];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -286,25 +286,23 @@ static bool test_read(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    if (resp.which_response_type != zmk_setting_expose_Response_read_tag) {
+    if (resp.which_result != zmk_setting_expose_Response_entry_tag) {
         return false;
     }
 
     const uint8_t expected[] = {0xDE, 0xAD, 0xBE, 0xEF};
-    if (resp.response_type.read.which_typed_value !=
-        zmk_setting_expose_ReadResponse_bytes_value_tag) {
+    if (resp.result.entry.which_typed_value != zmk_setting_expose_SettingEntry_bytes_value_tag) {
         return false;
     }
-    if (resp.response_type.read.typed_value.bytes_value.size != sizeof(expected)) {
+    if (resp.result.entry.typed_value.bytes_value.size != sizeof(expected)) {
         return false;
     }
-    return memcmp(resp.response_type.read.typed_value.bytes_value.bytes, expected,
-                  sizeof(expected)) == 0;
+    return memcmp(resp.result.entry.typed_value.bytes_value.bytes, expected, sizeof(expected)) == 0;
 }
 
 static bool test_list_contains_written_key(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_list_tag;
+    req.which_op = zmk_setting_expose_Request_list_tag;
 
     uint8_t buf[16];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -316,13 +314,13 @@ static bool test_list_contains_written_key(const struct zmk_rpc_custom_subsystem
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_list_tag;
+    return resp.which_result == zmk_setting_expose_Response_list_tag;
 }
 
 static bool test_delete(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_delete_tag;
-    strncpy(req.request_type.delete.key, TEST_KEY, sizeof(req.request_type.delete.key) - 1);
+    req.which_op = zmk_setting_expose_Request_delete_tag;
+    strncpy(req.op.delete.key, TEST_KEY, sizeof(req.op.delete.key) - 1);
 
     uint8_t buf[128];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -334,13 +332,13 @@ static bool test_delete(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_delete_tag;
+    return resp.which_result == zmk_setting_expose_Response_ok_tag;
 }
 
 static bool test_read_after_delete(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_read_tag;
-    strncpy(req.request_type.read.key, TEST_KEY, sizeof(req.request_type.read.key) - 1);
+    req.which_op = zmk_setting_expose_Request_read_tag;
+    strncpy(req.op.read.key, TEST_KEY, sizeof(req.op.read.key) - 1);
 
     uint8_t buf[128];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -352,15 +350,15 @@ static bool test_read_after_delete(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_error_tag;
+    return resp.which_result == zmk_setting_expose_Response_error_tag;
 }
 
 static bool test_empty_key_error(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_write_tag;
-    req.request_type.write.which_typed_value = zmk_setting_expose_WriteRequest_bytes_value_tag;
-    req.request_type.write.typed_value.bytes_value.bytes[0] = 0x01;
-    req.request_type.write.typed_value.bytes_value.size = 1;
+    req.which_op = zmk_setting_expose_Request_write_tag;
+    req.op.write.which_typed_value = zmk_setting_expose_SettingEntry_bytes_value_tag;
+    req.op.write.typed_value.bytes_value.bytes[0] = 0x01;
+    req.op.write.typed_value.bytes_value.size = 1;
 
     uint8_t buf[64];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -372,7 +370,7 @@ static bool test_empty_key_error(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_error_tag;
+    return resp.which_result == zmk_setting_expose_Response_error_tag;
 }
 
 static bool test_prefix_type_match(const struct zmk_rpc_custom_subsystem *sub) {
@@ -389,8 +387,8 @@ static bool test_prefix_type_match(const struct zmk_rpc_custom_subsystem *sub) {
 
     /* ReadRequest with this key encodes to 23 bytes, which fits the 25-byte cap. */
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_read_tag;
-    strncpy(req.request_type.read.key, key, sizeof(req.request_type.read.key) - 1);
+    req.which_op = zmk_setting_expose_Request_read_tag;
+    strncpy(req.op.read.key, key, sizeof(req.op.read.key) - 1);
 
     uint8_t buf[128];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -401,16 +399,15 @@ static bool test_prefix_type_match(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    if (resp.which_response_type != zmk_setting_expose_Response_read_tag) {
+    if (resp.which_result != zmk_setting_expose_Response_entry_tag) {
         return false;
     }
-    return resp.response_type.read.which_typed_value ==
-           zmk_setting_expose_ReadResponse_string_value_tag;
+    return resp.result.entry.which_typed_value == zmk_setting_expose_SettingEntry_string_value_tag;
 }
 
 static bool test_storage_info(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_storage_info_tag;
+    req.which_op = zmk_setting_expose_Request_storage_info_tag;
 
     uint8_t buf[16];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -422,12 +419,12 @@ static bool test_storage_info(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_storage_info_tag;
+    return resp.which_result == zmk_setting_expose_Response_storage_info_tag;
 }
 
 static bool test_gc(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_gc_tag;
+    req.which_op = zmk_setting_expose_Request_gc_tag;
 
     uint8_t buf[16];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -439,18 +436,18 @@ static bool test_gc(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_gc_tag;
+    return resp.which_result == zmk_setting_expose_Response_ok_tag;
 }
 
 static bool test_clear_all(const struct zmk_rpc_custom_subsystem *sub) {
     /* Write a key to be cleared */
     {
         zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-        req.which_request_type = zmk_setting_expose_Request_write_tag;
-        strncpy(req.request_type.write.key, "ca/k", sizeof(req.request_type.write.key) - 1);
-        req.request_type.write.which_typed_value = zmk_setting_expose_WriteRequest_bytes_value_tag;
-        req.request_type.write.typed_value.bytes_value.bytes[0] = 0x01;
-        req.request_type.write.typed_value.bytes_value.size = 1;
+        req.which_op = zmk_setting_expose_Request_write_tag;
+        strncpy(req.op.write.key, "ca/k", sizeof(req.op.write.key) - 1);
+        req.op.write.which_typed_value = zmk_setting_expose_SettingEntry_bytes_value_tag;
+        req.op.write.typed_value.bytes_value.bytes[0] = 0x01;
+        req.op.write.typed_value.bytes_value.size = 1;
 
         uint8_t buf[128];
         pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -461,7 +458,7 @@ static bool test_clear_all(const struct zmk_rpc_custom_subsystem *sub) {
         if (!call_handler(sub, buf, s.bytes_written, &resp)) {
             return false;
         }
-        if (resp.which_response_type != zmk_setting_expose_Response_write_tag) {
+        if (resp.which_result != zmk_setting_expose_Response_ok_tag) {
             return false;
         }
     }
@@ -469,7 +466,7 @@ static bool test_clear_all(const struct zmk_rpc_custom_subsystem *sub) {
     /* Clear all */
     {
         zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-        req.which_request_type = zmk_setting_expose_Request_clear_all_tag;
+        req.which_op = zmk_setting_expose_Request_clear_all_tag;
 
         uint8_t buf[16];
         pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -480,7 +477,7 @@ static bool test_clear_all(const struct zmk_rpc_custom_subsystem *sub) {
         if (!call_handler(sub, buf, s.bytes_written, &resp)) {
             return false;
         }
-        if (resp.which_response_type != zmk_setting_expose_Response_clear_all_tag) {
+        if (resp.which_result != zmk_setting_expose_Response_ok_tag) {
             return false;
         }
     }
@@ -488,8 +485,8 @@ static bool test_clear_all(const struct zmk_rpc_custom_subsystem *sub) {
     /* Read the key - should be gone */
     {
         zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-        req.which_request_type = zmk_setting_expose_Request_read_tag;
-        strncpy(req.request_type.read.key, "ca/k", sizeof(req.request_type.read.key) - 1);
+        req.which_op = zmk_setting_expose_Request_read_tag;
+        strncpy(req.op.read.key, "ca/k", sizeof(req.op.read.key) - 1);
 
         uint8_t buf[128];
         pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -500,13 +497,13 @@ static bool test_clear_all(const struct zmk_rpc_custom_subsystem *sub) {
         if (!call_handler(sub, buf, s.bytes_written, &resp)) {
             return false;
         }
-        return resp.which_response_type == zmk_setting_expose_Response_error_tag;
+        return resp.which_result == zmk_setting_expose_Response_error_tag;
     }
 }
 
 static bool clear_all_via_rpc(const struct zmk_rpc_custom_subsystem *sub) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_clear_all_tag;
+    req.which_op = zmk_setting_expose_Request_clear_all_tag;
 
     uint8_t buf[16];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -517,7 +514,7 @@ static bool clear_all_via_rpc(const struct zmk_rpc_custom_subsystem *sub) {
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_clear_all_tag;
+    return resp.which_result == zmk_setting_expose_Response_ok_tag;
 }
 
 /*
@@ -526,11 +523,11 @@ static bool clear_all_via_rpc(const struct zmk_rpc_custom_subsystem *sub) {
  * decoded normally, which is what the pagination test asserts on.
  */
 static bool list_page(const struct zmk_rpc_custom_subsystem *sub, uint32_t offset, uint32_t limit,
-                      zmk_setting_expose_ListResponse *out_list) {
+                      zmk_setting_expose_ListPage *out_list) {
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
-    req.which_request_type = zmk_setting_expose_Request_list_tag;
-    req.request_type.list.offset = offset;
-    req.request_type.list.limit = limit;
+    req.which_op = zmk_setting_expose_Request_list_tag;
+    req.op.list.offset = offset;
+    req.op.list.limit = limit;
 
     uint8_t buf[32];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -541,10 +538,10 @@ static bool list_page(const struct zmk_rpc_custom_subsystem *sub, uint32_t offse
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    if (resp.which_response_type != zmk_setting_expose_Response_list_tag) {
+    if (resp.which_result != zmk_setting_expose_Response_list_tag) {
         return false;
     }
-    *out_list = resp.response_type.list;
+    *out_list = resp.result.list;
     return true;
 }
 
@@ -562,7 +559,7 @@ static bool test_pagination(const struct zmk_rpc_custom_subsystem *sub) {
         }
     }
 
-    zmk_setting_expose_ListResponse l = zmk_setting_expose_ListResponse_init_zero;
+    zmk_setting_expose_ListPage l = zmk_setting_expose_ListPage_init_zero;
 
     /* Page 0 (offset 0, limit 2): more remain, cursor advances to 2. */
     if (!list_page(sub, 0, 2, &l) || !l.has_more || l.next_offset != 2) {
@@ -598,8 +595,8 @@ static bool test_target_all_fallback(const struct zmk_rpc_custom_subsystem *sub)
     zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
     req.target = SETTING_EXPOSE_TARGET_ALL;
     req.req_id = 99;
-    req.which_request_type = zmk_setting_expose_Request_read_tag;
-    strncpy(req.request_type.read.key, key, sizeof(req.request_type.read.key) - 1);
+    req.which_op = zmk_setting_expose_Request_read_tag;
+    strncpy(req.op.read.key, key, sizeof(req.op.read.key) - 1);
 
     uint8_t buf[64];
     pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -610,7 +607,7 @@ static bool test_target_all_fallback(const struct zmk_rpc_custom_subsystem *sub)
     if (!call_handler(sub, buf, s.bytes_written, &resp)) {
         return false;
     }
-    return resp.which_response_type == zmk_setting_expose_Response_read_tag;
+    return resp.which_result == zmk_setting_expose_Response_entry_tag;
 }
 
 /*
@@ -624,35 +621,39 @@ static bool test_dispatch_roundtrip(void) {
     const uint8_t val[] = {0x11, 0x22, 0x33, 0x44};
 
     zmk_setting_expose_Request wreq = zmk_setting_expose_Request_init_zero;
-    wreq.which_request_type = zmk_setting_expose_Request_write_tag;
-    strncpy(wreq.request_type.write.key, key, sizeof(wreq.request_type.write.key) - 1);
-    wreq.request_type.write.which_typed_value = zmk_setting_expose_WriteRequest_bytes_value_tag;
-    memcpy(wreq.request_type.write.typed_value.bytes_value.bytes, val, sizeof(val));
-    wreq.request_type.write.typed_value.bytes_value.size = sizeof(val);
+    wreq.which_op = zmk_setting_expose_Request_write_tag;
+    strncpy(wreq.op.write.key, key, sizeof(wreq.op.write.key) - 1);
+    wreq.op.write.which_typed_value = zmk_setting_expose_SettingEntry_bytes_value_tag;
+    memcpy(wreq.op.write.typed_value.bytes_value.bytes, val, sizeof(val));
+    wreq.op.write.typed_value.bytes_value.size = sizeof(val);
 
     zmk_setting_expose_Response wresp = zmk_setting_expose_Response_init_zero;
     if (setting_expose_dispatch(&wreq, &wresp) != 0) {
         return false;
     }
-    if (wresp.which_response_type != zmk_setting_expose_Response_write_tag) {
+    if (wresp.which_result != zmk_setting_expose_Response_ok_tag) {
         return false;
     }
 
     zmk_setting_expose_Request rreq = zmk_setting_expose_Request_init_zero;
-    rreq.which_request_type = zmk_setting_expose_Request_read_tag;
-    strncpy(rreq.request_type.read.key, key, sizeof(rreq.request_type.read.key) - 1);
+    rreq.which_op = zmk_setting_expose_Request_read_tag;
+    strncpy(rreq.op.read.key, key, sizeof(rreq.op.read.key) - 1);
 
     zmk_setting_expose_Response rresp = zmk_setting_expose_Response_init_zero;
     if (setting_expose_dispatch(&rreq, &rresp) != 0) {
         return false;
     }
 
-    /* Wrap the Response in a Notification and encode into the relay-sized buffer,
-     * then decode it back -- exactly what the peripheral relay path does before
-     * shipping a non-list reply. */
+    if (rresp.which_result != zmk_setting_expose_Response_entry_tag) {
+        return false;
+    }
+
+    /* A read result (a SettingEntry) is delivered as the `entry` event. Encode
+     * it into the relay-sized buffer and decode it back -- exactly what the
+     * peripheral relay path does before shipping a reply. */
     zmk_setting_expose_Notification n = zmk_setting_expose_Notification_init_zero;
-    n.which_event = zmk_setting_expose_Notification_response_tag;
-    n.event.response = rresp;
+    n.which_event = zmk_setting_expose_Notification_entry_tag;
+    n.event.entry = rresp.result.entry;
 
     uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
     pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
@@ -665,13 +666,11 @@ static bool test_dispatch_roundtrip(void) {
         return false;
     }
     /* Unregistered keys read back as raw bytes. */
-    return decoded.which_event == zmk_setting_expose_Notification_response_tag &&
-           decoded.event.response.which_response_type == zmk_setting_expose_Response_read_tag &&
-           decoded.event.response.response_type.read.which_typed_value ==
-               zmk_setting_expose_ReadResponse_bytes_value_tag &&
-           decoded.event.response.response_type.read.typed_value.bytes_value.size == sizeof(val) &&
-           memcmp(decoded.event.response.response_type.read.typed_value.bytes_value.bytes, val,
-                  sizeof(val)) == 0;
+    return decoded.which_event == zmk_setting_expose_Notification_entry_tag &&
+           decoded.event.entry.which_typed_value ==
+               zmk_setting_expose_SettingEntry_bytes_value_tag &&
+           decoded.event.entry.typed_value.bytes_value.size == sizeof(val) &&
+           memcmp(decoded.event.entry.typed_value.bytes_value.bytes, val, sizeof(val)) == 0;
 }
 
 /*
@@ -683,7 +682,7 @@ static bool test_dispatch_roundtrip(void) {
 static bool test_entry_at_streaming(void) {
     /* Start from a known-empty store. */
     zmk_setting_expose_Request creq = zmk_setting_expose_Request_init_zero;
-    creq.which_request_type = zmk_setting_expose_Request_clear_all_tag;
+    creq.which_op = zmk_setting_expose_Request_clear_all_tag;
     zmk_setting_expose_Response cresp = zmk_setting_expose_Response_init_zero;
     if (setting_expose_dispatch(&creq, &cresp) != 0) {
         return false;

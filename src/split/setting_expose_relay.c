@@ -101,7 +101,7 @@ static struct {
     uint32_t offset;
 } pstream;
 
-/* Length in bytes of a setting entry's value, for the entry_too_large marker. */
+/* Length in bytes of a setting entry's value, for the too_large marker. */
 static uint32_t entry_value_len(const zmk_setting_expose_SettingEntry *e) {
     switch (e->which_typed_value) {
     case zmk_setting_expose_SettingEntry_bytes_value_tag:
@@ -133,8 +133,8 @@ static void se_relay_stream_work_handler(struct k_work *work) {
     if (rc == 1) {
         answer_notif.which_event = zmk_setting_expose_Notification_entry_tag;
         if (!se_relay_send_reply(pstream.req_id, &answer_notif)) {
-            /* Value too big for one relay frame: stream a marker carrying just
-             * the key so the client can still show (and delete) the setting. */
+            /* Value too big for one relay frame: re-send the same entry with a
+             * `too_large` value so the client can still show (and delete) it. */
             char key[sizeof(answer_notif.event.entry.key)];
             strncpy(key, answer_notif.event.entry.key, sizeof(key) - 1);
             key[sizeof(key) - 1] = '\0';
@@ -143,10 +143,11 @@ static void se_relay_stream_work_handler(struct k_work *work) {
             answer_notif =
                 (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
             answer_notif.req_id = pstream.req_id;
-            answer_notif.which_event = zmk_setting_expose_Notification_entry_too_large_tag;
-            strncpy(answer_notif.event.entry_too_large.key, key,
-                    sizeof(answer_notif.event.entry_too_large.key) - 1);
-            answer_notif.event.entry_too_large.value_size = vlen;
+            answer_notif.which_event = zmk_setting_expose_Notification_entry_tag;
+            strncpy(answer_notif.event.entry.key, key, sizeof(answer_notif.event.entry.key) - 1);
+            answer_notif.event.entry.which_typed_value =
+                zmk_setting_expose_SettingEntry_too_large_tag;
+            answer_notif.event.entry.typed_value.too_large = vlen;
             se_relay_send_reply(pstream.req_id, &answer_notif);
         }
         pstream.offset++;
@@ -169,7 +170,7 @@ static void se_relay_answer_work_handler(struct k_work *work) {
             continue;
         }
 
-        if (answer_req.which_request_type == zmk_setting_expose_Request_list_tag) {
+        if (answer_req.which_op == zmk_setting_expose_Request_list_tag) {
             /* Stream the whole store one entry per cycle. */
             pstream.active = true;
             pstream.req_id = answer_query.req_id;
@@ -178,30 +179,47 @@ static void se_relay_answer_work_handler(struct k_work *work) {
             continue;
         }
 
-        /* Everything else is a single Response wrapped in one Notification. */
+        /* Everything else is a single result: dispatch, then map the Response's
+         * flat result into the matching Notification event. */
         answer_resp = (zmk_setting_expose_Response)zmk_setting_expose_Response_init_zero;
         int rc = setting_expose_dispatch(&answer_req, &answer_resp);
-        if (rc != 0) {
-            answer_resp = (zmk_setting_expose_Response)zmk_setting_expose_Response_init_zero;
-            answer_resp.which_response_type = zmk_setting_expose_Response_error_tag;
-            snprintf(answer_resp.response_type.error.message,
-                     sizeof(answer_resp.response_type.error.message), "Error: %d", rc);
-        }
 
         answer_notif = (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
         answer_notif.req_id = answer_query.req_id;
-        answer_notif.which_event = zmk_setting_expose_Notification_response_tag;
-        answer_notif.event.response = answer_resp;
+        if (rc != 0) {
+            answer_notif.which_event = zmk_setting_expose_Notification_error_tag;
+            snprintf(answer_notif.event.error.message, sizeof(answer_notif.event.error.message),
+                     "Error: %d", rc);
+        } else {
+            switch (answer_resp.which_result) {
+            case zmk_setting_expose_Response_entry_tag:
+                answer_notif.which_event = zmk_setting_expose_Notification_entry_tag;
+                answer_notif.event.entry = answer_resp.result.entry;
+                break;
+            case zmk_setting_expose_Response_ok_tag:
+                answer_notif.which_event = zmk_setting_expose_Notification_ok_tag;
+                answer_notif.event.ok = answer_resp.result.ok;
+                break;
+            case zmk_setting_expose_Response_storage_info_tag:
+                answer_notif.which_event = zmk_setting_expose_Notification_storage_info_tag;
+                answer_notif.event.storage_info = answer_resp.result.storage_info;
+                break;
+            default:
+                answer_notif.which_event = zmk_setting_expose_Notification_error_tag;
+                snprintf(answer_notif.event.error.message, sizeof(answer_notif.event.error.message),
+                         "Unexpected result");
+                break;
+            }
+        }
+
         if (!se_relay_send_reply(answer_query.req_id, &answer_notif)) {
             /* Result (e.g. a large read value) does not fit the relay frame:
              * report it as an error rather than dropping the reply silently. */
             answer_notif =
                 (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
             answer_notif.req_id = answer_query.req_id;
-            answer_notif.which_event = zmk_setting_expose_Notification_response_tag;
-            answer_notif.event.response.which_response_type = zmk_setting_expose_Response_error_tag;
-            snprintf(answer_notif.event.response.response_type.error.message,
-                     sizeof(answer_notif.event.response.response_type.error.message),
+            answer_notif.which_event = zmk_setting_expose_Notification_error_tag;
+            snprintf(answer_notif.event.error.message, sizeof(answer_notif.event.error.message),
                      "Value too large to relay");
             se_relay_send_reply(answer_query.req_id, &answer_notif);
         }
@@ -406,8 +424,8 @@ ZMK_SUBSCRIPTION(se_relay_notify, se_relay_reply);
 /* ---- Central entry point (RPC thread) ---- */
 
 static bool request_is_delete(const zmk_setting_expose_Request *req) {
-    return req->which_request_type == zmk_setting_expose_Request_delete_tag ||
-           req->which_request_type == zmk_setting_expose_Request_clear_all_tag;
+    return req->which_op == zmk_setting_expose_Request_delete_tag ||
+           req->which_op == zmk_setting_expose_Request_clear_all_tag;
 }
 
 int setting_expose_relay_dispatch(const zmk_setting_expose_Request *req,
@@ -452,7 +470,7 @@ int setting_expose_relay_dispatch(const zmk_setting_expose_Request *req,
         raise_se_relay_query(query);
     }
 
-    resp->which_response_type = zmk_setting_expose_Response_ack_tag;
+    resp->which_result = zmk_setting_expose_Response_ack_tag;
     return 0;
 }
 
