@@ -18,6 +18,8 @@
 #include <pb_encode.h>
 #include <zmk/studio/custom.h>
 #include <zmk/setting_expose/setting_expose.pb.h>
+#include <zmk/setting_expose/dispatch.h>
+#include <zmk/setting_expose/relay.h>
 
 #include <zephyr/init.h>
 #include <zephyr/settings/settings.h>
@@ -581,6 +583,133 @@ static bool test_pagination(const struct zmk_rpc_custom_subsystem *sub) {
     return true;
 }
 
+/*
+ * A targeted request (target != TARGET_CENTRAL) on a build WITHOUT split relay
+ * support degenerates to the local store, so the client still gets a real
+ * Response rather than a bare Ack. (native_sim has no ZMK_SPLIT.)
+ */
+static bool test_target_all_fallback(const struct zmk_rpc_custom_subsystem *sub) {
+    const char *key = "ta/k";
+    uint8_t v = 7;
+    if (settings_save_one(key, &v, 1) != 0) {
+        return false;
+    }
+
+    zmk_setting_expose_Request req = zmk_setting_expose_Request_init_zero;
+    req.target = SETTING_EXPOSE_TARGET_ALL;
+    req.req_id = 99;
+    req.which_request_type = zmk_setting_expose_Request_read_tag;
+    strncpy(req.request_type.read.key, key, sizeof(req.request_type.read.key) - 1);
+
+    uint8_t buf[64];
+    pb_ostream_t s = pb_ostream_from_buffer(buf, sizeof(buf));
+    if (!pb_encode(&s, zmk_setting_expose_Request_fields, &req)) {
+        return false;
+    }
+    zmk_setting_expose_Response resp = zmk_setting_expose_Response_init_zero;
+    if (!call_handler(sub, buf, s.bytes_written, &resp)) {
+        return false;
+    }
+    return resp.which_response_type == zmk_setting_expose_Response_read_tag;
+}
+
+/*
+ * The peripheral relay path decodes a Request, runs setting_expose_dispatch
+ * against its own store, and encodes the Response into a fixed buffer. Exercise
+ * that data path directly (no BLE): write via dispatch, then read it back.
+ */
+static bool test_dispatch_roundtrip(void) {
+    const char *key = "rt/k";
+
+    const uint8_t val[] = {0x11, 0x22, 0x33, 0x44};
+
+    zmk_setting_expose_Request wreq = zmk_setting_expose_Request_init_zero;
+    wreq.which_request_type = zmk_setting_expose_Request_write_tag;
+    strncpy(wreq.request_type.write.key, key, sizeof(wreq.request_type.write.key) - 1);
+    wreq.request_type.write.which_typed_value = zmk_setting_expose_WriteRequest_bytes_value_tag;
+    memcpy(wreq.request_type.write.typed_value.bytes_value.bytes, val, sizeof(val));
+    wreq.request_type.write.typed_value.bytes_value.size = sizeof(val);
+
+    zmk_setting_expose_Response wresp = zmk_setting_expose_Response_init_zero;
+    if (setting_expose_dispatch(&wreq, &wresp, SE_RELAY_LIST_BUDGET) != 0) {
+        return false;
+    }
+    if (wresp.which_response_type != zmk_setting_expose_Response_write_tag) {
+        return false;
+    }
+
+    zmk_setting_expose_Request rreq = zmk_setting_expose_Request_init_zero;
+    rreq.which_request_type = zmk_setting_expose_Request_read_tag;
+    strncpy(rreq.request_type.read.key, key, sizeof(rreq.request_type.read.key) - 1);
+
+    zmk_setting_expose_Response rresp = zmk_setting_expose_Response_init_zero;
+    if (setting_expose_dispatch(&rreq, &rresp, SE_RELAY_LIST_BUDGET) != 0) {
+        return false;
+    }
+
+    /* Encode the Response into the relay-sized buffer, decode it back (this is
+     * exactly what the peripheral relay path does before shipping the reply). */
+    uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
+    pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+    if (!pb_encode(&os, zmk_setting_expose_Response_fields, &rresp)) {
+        return false;
+    }
+    zmk_setting_expose_Response decoded = zmk_setting_expose_Response_init_zero;
+    pb_istream_t is = pb_istream_from_buffer(buf, os.bytes_written);
+    if (!pb_decode(&is, zmk_setting_expose_Response_fields, &decoded)) {
+        return false;
+    }
+    /* Unregistered keys read back as raw bytes. */
+    return decoded.which_response_type == zmk_setting_expose_Response_read_tag &&
+           decoded.response_type.read.which_typed_value ==
+               zmk_setting_expose_ReadResponse_bytes_value_tag &&
+           decoded.response_type.read.typed_value.bytes_value.size == sizeof(val) &&
+           memcmp(decoded.response_type.read.typed_value.bytes_value.bytes, val, sizeof(val)) == 0;
+}
+
+/*
+ * A relayed list page must fit the reply buffer regardless of entry count. The
+ * byte-budget guard should stop packing before it overflows and report
+ * has_more, while a whole page still encodes within SE_RELAY_REPLY_DATA_MAX.
+ */
+static bool test_relay_list_budget(void) {
+    /* Start empty, then add several large-valued entries. */
+    zmk_setting_expose_Request creq = zmk_setting_expose_Request_init_zero;
+    creq.which_request_type = zmk_setting_expose_Request_clear_all_tag;
+    zmk_setting_expose_Response cresp = zmk_setting_expose_Response_init_zero;
+    if (setting_expose_dispatch(&creq, &cresp, 0) != 0) {
+        return false;
+    }
+
+    uint8_t big[200];
+    memset(big, 0xAB, sizeof(big));
+    for (int i = 0; i < 4; i++) {
+        char key[] = "bg/0";
+        key[3] = (char)('0' + i);
+        if (settings_save_one(key, big, sizeof(big)) != 0) {
+            return false;
+        }
+    }
+
+    zmk_setting_expose_Request lreq = zmk_setting_expose_Request_init_zero;
+    lreq.which_request_type = zmk_setting_expose_Request_list_tag;
+    lreq.request_type.list.limit = 0; /* "all"; the byte budget must still bound the page */
+
+    zmk_setting_expose_Response lresp = zmk_setting_expose_Response_init_zero;
+    if (setting_expose_dispatch(&lreq, &lresp, SE_RELAY_LIST_BUDGET) != 0) {
+        return false;
+    }
+
+    uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
+    pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+    if (!pb_encode(&os, zmk_setting_expose_Response_fields, &lresp)) {
+        return false; /* must fit the relay buffer */
+    }
+    /* 4 x ~210 B entries cannot all fit a ~460 B budget: expect a partial page. */
+    return lresp.response_type.list.has_more && lresp.response_type.list.next_offset > 0 &&
+           lresp.response_type.list.next_offset < 4;
+}
+
 /* ---- Boot-time test runner ---------------------------------------------- */
 
 static int setting_expose_unit_tests(void) {
@@ -608,6 +737,9 @@ static int setting_expose_unit_tests(void) {
     RUN_TEST(gc, test_gc(sub));
     RUN_TEST(clear_all, test_clear_all(sub));
     RUN_TEST(pagination, test_pagination(sub));
+    RUN_TEST(target_all_fallback, test_target_all_fallback(sub));
+    RUN_TEST(dispatch_roundtrip, test_dispatch_roundtrip());
+    RUN_TEST(relay_list_budget, test_relay_list_budget());
 
     LOG_INF("setting_expose_test: done");
     return 0;

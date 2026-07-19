@@ -2,6 +2,9 @@ config ZMK_SETTING_EXPOSE
     bool "Expose Zephyr settings via ZMK Studio RPC"
     depends on ZMK_STUDIO
     depends on SETTINGS
+    # nanopb is normally pulled in by ZMK_STUDIO, but select it explicitly so the
+    # shared proto/dispatch builds regardless of how it is reached.
+    select NANOPB
     help
       Enables the setting_expose custom Studio RPC subsystem, which allows
       a connected ZMK Studio web UI to list, read, write, and delete Zephyr
@@ -19,5 +22,69 @@ config ZMK_SETTING_EXPOSE_UNIT_TEST
       When enabled, a SYS_INIT function exercises the setting_expose RPC
       handler at boot and logs PASS/FAIL results for each test case.
       This option is intended for automated testing only.
+
+endif
+
+#
+# Split support. This is deliberately NOT nested under ZMK_SETTING_EXPOSE: the
+# split *peripheral* image has no ZMK_STUDIO (so ZMK_SETTING_EXPOSE is off
+# there) yet must still build the shared dispatch + relay to answer the
+# central's relayed requests. Enable this on BOTH halves.
+#
+config ZMK_SETTING_EXPOSE_SPLIT
+    bool "Relay setting_expose requests to the split peripheral half/halves"
+    depends on ZMK_SPLIT
+    depends on SETTINGS
+    default y
+    select ZMK_SPLIT_RELAY_EVENT
+    # The peripheral answers relayed requests with the shared nanopb dispatch
+    # but has no ZMK_STUDIO to pull nanopb in, so select it.
+    select NANOPB
+    help
+      On a split keyboard, let the ZMK Studio web UI address the peripheral
+      half/halves via the Request `target` field: the central relays the
+      request over the ZMK split event-relay, each peripheral runs it against
+      its OWN settings store, and the reply is delivered back to the client as
+      an RPC notification. A `target = all` delete/clear_all deletes the
+      peripherals first and the central last (after every peripheral replies or
+      a timeout elapses), then notifies completion.
+
+      Both halves must be built with this option. The central additionally
+      needs ZMK_SETTING_EXPOSE (the Studio RPC handler); the peripheral only
+      needs this option to answer relayed requests. Set to n to keep the module
+      central-only and avoid the extra relay characteristic and RAM.
+
+if ZMK_SETTING_EXPOSE_SPLIT
+
+config ZMK_SETTING_EXPOSE_RELAY_STACK_SIZE
+    int "Stack size (bytes) for the setting_expose relay work queue"
+    default 4096
+    help
+      The relay work queue decodes/encodes protobuf and -- on the central --
+      raises Studio RPC notifications, which synchronously build large
+      notification + response structs and run a double pb_encode. Doing that on
+      the shared system work queue (which the split relay receive path already
+      runs on) overflows its stack, so the relay hands the heavy work to its own
+      thread. Sized like the Studio RPC thread. Raise it if you see a stack
+      overflow in the "se_relay" thread.
+
+config ZMK_SETTING_EXPOSE_DELETE_ALL_TIMEOUT_MS
+    int "Timeout (ms) waiting for peripheral replies before deleting the central"
+    default 3000
+    help
+      For a `target = all` delete/clear_all the central deletes its own store
+      only after every peripheral has replied. ZMK exposes no reliable count of
+      *connected* peripherals, so this timeout bounds the wait: once it elapses
+      the central deletes its store and emits the completion notification even
+      if a peripheral (e.g. a disconnected half) never replied.
+
+# A single relayed reply carries an encoded Response up to SE_RELAY_REPLY_DATA_MAX
+# bytes (one Read / one-entry List page with a 256-byte value). Raise the
+# reassembled relay payload ceiling to fit it; the relay transport chunks it
+# across the split link automatically. If this default does not take effect for
+# your build, set CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=512 explicitly --
+# include/zmk/setting_expose/relay.h BUILD_ASSERTs it.
+config ZMK_SPLIT_RELAY_EVENT_DATA_LEN
+    default 512
 
 endif

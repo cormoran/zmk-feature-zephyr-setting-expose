@@ -82,6 +82,25 @@ class WestCommandsTests(unittest.TestCase):
                     ],
                     device=[],
                 ),
+                "setting_expose_board_split_central": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_SETTING_EXPOSE=y",
+                        "CONFIG_ZMK_SETTING_EXPOSE_SPLIT=y",
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
+                        "CONFIG_ZMK_SPLIT_ROLE_CENTRAL=y",
+                    ],
+                    device=[],
+                ),
+                "setting_expose_board_split_peripheral": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_SETTING_EXPOSE_SPLIT=y",
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
+                        # The peripheral has no ZMK_STUDIO, so the Studio-facing
+                        # feature is off there; only the relay path is built.
+                        NotFound("CONFIG_ZMK_SETTING_EXPOSE=y"),
+                    ],
+                    device=[],
+                ),
             }
         )
 

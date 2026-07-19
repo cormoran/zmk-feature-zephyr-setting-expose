@@ -83,7 +83,36 @@ message ClearAllResponse {}
 
 message ErrorResponse { string message = 1; }
 
+// Immediate acknowledgement returned by the central for a targeted request
+// (target != TARGET_CENTRAL). The actual per-half result(s) arrive later as
+// Notification messages -- see the `target` field on Request.
+message AckResponse {}
+
+// Which half of a split keyboard a request addresses. `target` on Request:
+//   TARGET_CENTRAL (0) -- the central half only. Handled synchronously; the
+//                         result is returned in this call's Response. Default,
+//                         and the only path on a non-split keyboard.
+//   1 .. 0xFFFE        -- a specific peripheral by 1-based source index. The
+//                         central broadcasts the request to every peripheral
+//                         (ZMK's relay cannot address one), runs it there, and
+//                         forwards only the reply whose source matches as a
+//                         Notification.
+//   TARGET_ALL (0xFFFF)-- every half (central + all peripherals). Each half's
+//                         result arrives as its own Notification (central's as
+//                         source 0). A delete/clear_all with TARGET_ALL deletes
+//                         the peripherals first and the central last, then
+//                         emits a Notification with complete=true.
+enum Target {
+    TARGET_CENTRAL = 0;
+    TARGET_ALL = 0xFFFF;
+}
+
 message Request {
+    // Split-keyboard target (see Target). Absent/0 == TARGET_CENTRAL.
+    uint32 target = 8;
+    // Client-chosen id echoed back in every Notification produced for this
+    // request, so the client can correlate/ignore stale asynchronous replies.
+    uint32 req_id = 9;
     oneof request_type {
         ListRequest list = 1;
         ReadRequest read = 2;
@@ -105,5 +134,19 @@ message Response {
         StorageInfoResponse storage_info = 6;
         GcResponse gc = 7;
         ClearAllResponse clear_all = 8;
+        AckResponse ack = 9;
     }
+}
+
+// Firmware-initiated notification carrying one half's answer to a targeted
+// request. `source` is 0 for the central and the 1-based index for a
+// peripheral; `req_id` echoes the triggering Request; `payload` is an encoded
+// Response produced by that half (empty when `complete` is the only content).
+// `complete` marks the end of a TARGET_ALL delete/clear_all (raised by the
+// central after it has deleted its own store last).
+message Notification {
+    uint32 source = 1;
+    uint32 req_id = 2;
+    bytes payload = 3;
+    bool complete = 4;
 }

@@ -19,3 +19,9 @@ zmk.setting_expose.WriteRequest.string_value    max_size:256
 zmk.setting_expose.DeleteRequest.key            max_size:80
 
 zmk.setting_expose.ErrorResponse.message        max_size:64
+
+# Notification.payload carries an encoded Response relayed from a split half.
+# Sized to hold one maximum SettingEntry (key 80 + value 256 + framing) so a
+# single-entry list page or a full read always fits; keep in sync with the
+# relay reply buffer (SE_RELAY_REPLY_DATA_MAX in include/zmk/setting_expose/relay.h).
+zmk.setting_expose.Notification.payload         max_size:480
