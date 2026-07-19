@@ -2,10 +2,17 @@ This repository is a ZMK module that exposes the Zephyr settings store (NVS key/
 
 Key files:
 - `proto/zmk/setting_expose/setting_expose.proto` — RPC message definitions
-- `src/studio/setting_expose_handler.c` — firmware RPC handler
+- `src/setting_expose_dispatch.c` — shared per-operation logic (runs on the
+  central AND the split peripheral); `include/zmk/setting_expose/dispatch.h`
+- `src/studio/setting_expose_handler.c` — central Studio RPC entry point
+  (decode + route by `target`)
+- `src/split/setting_expose_relay*.c` — split event-relay glue (peripheral
+  answer path + central forward/filter + delete-all); `include/zmk/setting_expose/relay.h`
 - `include/zmk/setting_expose.h` — public API (`ZMK_SETTING_EXPOSE_REGISTER` macros)
 - `src/zmk_known_settings.c` — built-in type hints for well-known ZMK settings
 - `web/src/App.tsx` — React web UI
+- `DESIGN.md` — split-keyboard target design (relay flow, delete-all ordering,
+  buffer sizing)
 
 ## Dev Rules
 
