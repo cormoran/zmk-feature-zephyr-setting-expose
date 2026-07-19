@@ -16,30 +16,25 @@
  * `se_relay_query` travels central -> peripheral (identifier "SEq") and carries
  * an opaque nanopb-encoded inner Request; `se_relay_reply` travels
  * peripheral -> central (identifier "SEr") and carries an encoded inner
- * Response. The peripheral answers with the SAME setting_expose_dispatch the
- * central uses, run against its OWN settings store -- no duplicate op logic.
- * See src/split/setting_expose_relay.c.
+ * Notification event. The peripheral answers a non-`list` request with the SAME
+ * setting_expose_dispatch the central uses; a `list` is streamed one
+ * SettingEntry per reply (plus a final list_done) so no per-page buffer is
+ * needed. The central just stamps `source` on each reply and forwards it to the
+ * connected Studio client. See src/split/setting_expose_relay.c.
  *
  * The whole struct is memcpy'd into the relay payload, so it must fit
  * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN (asserted by the relay macros). Setting
- * values are up to 256 bytes, so one encoded read/write/single-entry-list
- * message can be ~360 bytes; the data buffers are sized to hold that plus
- * framing, and the reassembled relay payload ceiling is raised to match (see
- * Kconfig). Both halves run the same little-endian CPU, so the encoded protobuf
- * is portable as-is.
+ * values are up to 256 bytes, so one encoded Notification (one SettingEntry, or
+ * a read Response) can be ~360 bytes; the data buffers are sized to hold that
+ * plus framing, and the reassembled relay payload ceiling is raised to match
+ * (see Kconfig). Both halves run the same little-endian CPU, so the encoded
+ * protobuf is portable as-is.
  */
 
 /* Encoded inner Request (largest: a Write with a 256-byte value + framing). */
-#define SE_RELAY_QUERY_DATA_MAX 480
-/* Encoded inner Response (largest: a Read / one-entry List page + framing). */
-#define SE_RELAY_REPLY_DATA_MAX 480
-
-/*
- * Byte budget handed to setting_expose_dispatch for a relayed `list` so one
- * page always fits SE_RELAY_REPLY_DATA_MAX (leaving room for the ListResponse
- * next_offset/has_more fields and Response framing).
- */
-#define SE_RELAY_LIST_BUDGET (SE_RELAY_REPLY_DATA_MAX - 20)
+#define SE_RELAY_QUERY_DATA_MAX 400
+/* Encoded inner Notification event (largest: one SettingEntry / a Read + framing). */
+#define SE_RELAY_REPLY_DATA_MAX 400
 
 struct se_relay_query {
     uint8_t source; /* ZMK_RELAY_EVENT_SOURCE_SELF on send; sender index+1 on receive */
@@ -52,7 +47,7 @@ struct se_relay_reply {
     uint8_t source;
     uint8_t req_id;
     uint16_t len;
-    uint8_t data[SE_RELAY_REPLY_DATA_MAX]; /* encoded inner Response */
+    uint8_t data[SE_RELAY_REPLY_DATA_MAX]; /* encoded inner Notification event */
 } __packed;
 
 /*
@@ -77,10 +72,11 @@ ZMK_EVENT_DECLARE(se_relay_reply);
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 /*
  * Central entry point for a targeted (target != TARGET_CENTRAL) request, called
- * from the Studio RPC handler. Broadcasts the request to the peripheral(s),
- * handles the central's own part where TARGET_ALL requires it, and sets @p resp
- * to an AckResponse (or ErrorResponse). Per-half results arrive asynchronously
- * as Notifications. Returns 0 on success, negative errno otherwise.
+ * from the Studio RPC handler. Broadcasts the request to the peripheral(s) and
+ * sets @p resp to an AckResponse. Per-half results arrive asynchronously as
+ * Notifications; the central's OWN store is read via the synchronous path
+ * (target 0), so TARGET_ALL only relays to peripherals here. Returns 0 on
+ * success, negative errno otherwise.
  */
 int setting_expose_relay_dispatch(const zmk_setting_expose_Request *req,
                                   zmk_setting_expose_Response *resp);

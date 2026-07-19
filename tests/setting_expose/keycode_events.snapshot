@@ -14,5 +14,5 @@ PASS: clear_all
 PASS: pagination
 PASS: target_all_fallback
 PASS: dispatch_roundtrip
-PASS: relay_list_budget
+PASS: entry_at_streaming
 done

@@ -184,20 +184,17 @@ static int write_request_to_raw(const zmk_setting_expose_WriteRequest *req, uint
 static struct list_req_params {
     uint32_t offset;
     uint32_t limit;
-    uint32_t byte_budget; /* 0 == unbounded; else stop before exceeding this many entry bytes */
     zmk_setting_expose_ListResponse *out;
 } list_params;
 
 struct list_encode_ctx {
     pb_ostream_t *stream;
     const pb_field_t *field;
-    uint32_t offset;      /* skip entries with index < offset */
-    uint32_t limit;       /* stop after this many encoded; 0 = unlimited */
-    uint32_t byte_budget; /* 0 = unbounded; else cap on total encoded entry bytes */
-    uint32_t used;        /* running total of encoded entry bytes (submessage + framing) */
-    uint32_t seen;        /* running index of the entry being visited */
-    uint32_t encoded;     /* entries encoded into this page */
-    bool has_more;        /* at least one entry exists beyond this page */
+    uint32_t offset;  /* skip entries with index < offset */
+    uint32_t limit;   /* stop after this many encoded; 0 = unlimited */
+    uint32_t seen;    /* running index of the entry being visited */
+    uint32_t encoded; /* entries encoded into this page */
+    bool has_more;    /* at least one entry exists beyond this page */
     int error;
 };
 
@@ -237,29 +234,6 @@ static int settings_list_cb(const char *key, size_t len, settings_read_cb read_c
     enum zmk_setting_type type = find_type_for_key(key);
     fill_setting_entry_typed_value(&entry, raw, (size_t)read_len, type);
 
-    /*
-     * Byte-budget guard (relay path): a relayed page is encoded into a fixed
-     * buffer, so stop before an entry would overflow it and report has_more.
-     * Always emit at least one entry per page (so a single large-valued setting
-     * still makes progress across pages) -- the buffer is sized to hold one
-     * maximum entry.
-     */
-    if (ctx->byte_budget != 0) {
-        size_t entry_size = 0;
-        if (!pb_get_encoded_size(&entry_size, zmk_setting_expose_SettingEntry_fields, &entry)) {
-            LOG_WRN("Failed to size setting entry for key %s", key);
-            ctx->error = EIO;
-            return -EIO;
-        }
-        /* tag + length prefix for the repeated submessage field */
-        size_t framed = entry_size + 8;
-        if (ctx->encoded > 0 && ctx->used + framed > ctx->byte_budget) {
-            ctx->has_more = true;
-            return 0;
-        }
-        ctx->used += framed;
-    }
-
     if (!pb_encode_tag_for_field(ctx->stream, ctx->field) ||
         !pb_encode_submessage(ctx->stream, zmk_setting_expose_SettingEntry_fields, &entry)) {
         LOG_WRN("Failed to encode setting entry for key %s", key);
@@ -277,8 +251,6 @@ static bool encode_list_entries(pb_ostream_t *stream, const pb_field_t *field, v
         .field = field,
         .offset = list_params.offset,
         .limit = list_params.limit,
-        .byte_budget = list_params.byte_budget,
-        .used = 0,
         .seen = 0,
         .encoded = 0,
         .has_more = false,
@@ -300,16 +272,51 @@ static bool encode_list_entries(pb_ostream_t *stream, const pb_field_t *field, v
 }
 
 static int handle_list_request(const zmk_setting_expose_ListRequest *req,
-                               zmk_setting_expose_Response *resp, uint32_t byte_budget) {
+                               zmk_setting_expose_Response *resp) {
     resp->which_response_type = zmk_setting_expose_Response_list_tag;
     resp->response_type.list.entries.funcs.encode = encode_list_entries;
     resp->response_type.list.entries.arg = NULL;
 
     list_params.offset = req->offset;
     list_params.limit = req->limit;
-    list_params.byte_budget = byte_budget;
     list_params.out = &resp->response_type.list;
     return 0;
+}
+
+/* ---- Single-entry fetch (relay list streaming) -------------------------- */
+
+struct entry_at_ctx {
+    uint32_t target; /* index wanted */
+    uint32_t seen;   /* running index */
+    zmk_setting_expose_SettingEntry *out;
+    bool found;
+};
+
+static int entry_at_cb(const char *key, size_t len, settings_read_cb read_cb, void *cb_arg,
+                       void *param) {
+    struct entry_at_ctx *ctx = (struct entry_at_ctx *)param;
+    if (ctx->seen++ != ctx->target) {
+        return 0; /* not this one -- skip cheaply, no value read */
+    }
+
+    *ctx->out = (zmk_setting_expose_SettingEntry)zmk_setting_expose_SettingEntry_init_zero;
+    strncpy(ctx->out->key, key, sizeof(ctx->out->key) - 1);
+
+    uint8_t raw[256];
+    ssize_t read_len = read_cb(cb_arg, raw, sizeof(raw));
+    if (read_len < 0) {
+        LOG_WRN("Failed to read value for key %s: %d", key, (int)read_len);
+        read_len = 0;
+    }
+    fill_setting_entry_typed_value(ctx->out, raw, (size_t)read_len, find_type_for_key(key));
+    ctx->found = true;
+    return 1; /* stop iteration early once the target is emitted */
+}
+
+int setting_expose_entry_at(uint32_t index, zmk_setting_expose_SettingEntry *out) {
+    struct entry_at_ctx ctx = {.target = index, .seen = 0, .out = out, .found = false};
+    settings_load_subtree_direct(NULL, entry_at_cb, &ctx);
+    return ctx.found ? 1 : 0;
 }
 
 /* ---- Read handler ------------------------------------------------------- */
@@ -513,10 +520,10 @@ static int handle_clear_all_request(const zmk_setting_expose_ClearAllRequest *re
 /* ---- Dispatch ----------------------------------------------------------- */
 
 int setting_expose_dispatch(const zmk_setting_expose_Request *req,
-                            zmk_setting_expose_Response *resp, uint32_t list_byte_budget) {
+                            zmk_setting_expose_Response *resp) {
     switch (req->which_request_type) {
     case zmk_setting_expose_Request_list_tag:
-        return handle_list_request(&req->request_type.list, resp, list_byte_budget);
+        return handle_list_request(&req->request_type.list, resp);
     case zmk_setting_expose_Request_read_tag:
         return handle_read_request(&req->request_type.read, resp);
     case zmk_setting_expose_Request_write_tag:

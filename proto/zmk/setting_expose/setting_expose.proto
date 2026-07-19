@@ -138,15 +138,29 @@ message Response {
     }
 }
 
+// End-of-stream marker for a `list` answered over notifications: the half
+// identified by `source` has sent every SettingEntry it holds.
+message ListDone {}
+
+// A TARGET_ALL delete/clear_all has finished: the central deleted the
+// peripherals first and its own store last.
+message Complete {}
+
 // Firmware-initiated notification carrying one half's answer to a targeted
 // request. `source` is 0 for the central and the 1-based index for a
-// peripheral; `req_id` echoes the triggering Request; `payload` is an encoded
-// Response produced by that half (empty when `complete` is the only content).
-// `complete` marks the end of a TARGET_ALL delete/clear_all (raised by the
-// central after it has deleted its own store last).
+// peripheral; `req_id` echoes the triggering Request. The `event` is type-safe
+// (no opaque bytes):
+//   - a `list` streams one `entry` per notification (to keep peripheral memory
+//     tiny -- there is no per-page buffer), terminated by `list_done`;
+//   - every other operation returns a single `response`;
+//   - a TARGET_ALL delete/clear_all ends with `complete`.
 message Notification {
     uint32 source = 1;
     uint32 req_id = 2;
-    bytes payload = 3;
-    bool complete = 4;
+    oneof event {
+        SettingEntry entry = 3;
+        ListDone list_done = 4;
+        Response response = 5;
+        Complete complete = 6;
+    }
 }

@@ -181,14 +181,18 @@ async function callRPC(
   return Response.decode(responsePayload);
 }
 
-/** One asynchronous reply gathered from a targeted request. */
-type SourceResult = { source: number; resp: Response };
+/** Results gathered from the notifications of one targeted request. */
+type TargetedResult = {
+  /** Streamed `list` entries, grouped by reply source. */
+  entriesBySource: Record<number, SettingEntry[]>;
+  /** Single Response per source for non-list ops (read/write/delete/gc/...). */
+  responseBySource: Record<number, Response>;
+  /** A TARGET_ALL delete/clear_all reported completion. */
+  completed: boolean;
+};
 
 /** Registered collector for the notifications of one in-flight targeted request. */
-type Collector = {
-  onResponse: (source: number, resp: Response) => void;
-  onComplete: () => void;
-};
+type Collector = { onEvent: (source: number, n: Notification) => void };
 
 // ---- App ------------------------------------------------------------------
 
@@ -298,16 +302,7 @@ export function SettingsSection() {
         } catch {
           return;
         }
-        const c = collectors.current.get(n.reqId);
-        if (!c) return;
-        if (n.payload && n.payload.length > 0) {
-          try {
-            c.onResponse(n.source, Response.decode(n.payload));
-          } catch {
-            /* ignore malformed payloads */
-          }
-        }
-        if (n.complete) c.onComplete();
+        collectors.current.get(n.reqId)?.onEvent(n.source, n);
       },
     };
     const unsub = zmkApp.onNotification(sub);
@@ -334,20 +329,25 @@ export function SettingsSection() {
    *   - On a build without split relay the request returns the real Response
    *     directly (central-only fallback); we surface it as source 0.
    *
-   * mode: "first" resolves on the first reply (one addressed half); "collect"
-   * waits a fixed window for every half; "complete" waits for the completion
-   * notification (target = all delete/clear_all).
+   * mode: "first" resolves on the first non-list Response (one addressed half);
+   * "list" streams entries and resolves on the addressed source's list_done;
+   * "collect" waits a fixed window for every half's stream; "complete" waits for
+   * the completion notification (target = all delete/clear_all).
    */
   const sendTargeted = useCallback(
     async (
       service: ZMKCustomSubsystem,
       fields: Partial<Request>,
       reqTarget: number,
-      mode: "first" | "collect" | "complete",
+      mode: "first" | "list" | "collect" | "complete",
       timeout: number
-    ): Promise<SourceResult[]> => {
+    ): Promise<TargetedResult> => {
       const reqId = nextReqId();
-      const results: SourceResult[] = [];
+      const result: TargetedResult = {
+        entriesBySource: {},
+        responseBySource: {},
+        completed: false,
+      };
 
       const collected = new Promise<void>((resolve) => {
         const done = () => {
@@ -357,12 +357,19 @@ export function SettingsSection() {
         };
         const timer = setTimeout(done, timeout);
         collectors.current.set(reqId, {
-          onResponse: (source, resp) => {
-            results.push({ source, resp });
-            if (mode === "first") done();
-          },
-          onComplete: () => {
-            if (mode === "complete") done();
+          onEvent: (source, n) => {
+            if (n.entry) {
+              (result.entriesBySource[source] ??= []).push(n.entry);
+            } else if (n.listDone) {
+              result.entriesBySource[source] ??= [];
+              if (mode === "list" && source === reqTarget) done();
+            } else if (n.response) {
+              result.responseBySource[source] = n.response;
+              if (mode === "first") done();
+            } else if (n.complete) {
+              result.completed = true;
+              if (mode === "complete") done();
+            }
           },
         });
       });
@@ -375,10 +382,12 @@ export function SettingsSection() {
       if (ack.ack === undefined) {
         /* Central-only fallback (or an error): the sync response IS the result. */
         collectors.current.delete(reqId);
-        return [{ source: 0, resp: ack }];
+        result.responseBySource[0] = ack;
+        if (ack.list) result.entriesBySource[0] = ack.list.entries;
+        return result;
       }
       await collected;
-      return results;
+      return result;
     },
     []
   );
@@ -424,31 +433,26 @@ export function SettingsSection() {
     return collected;
   };
 
-  /* Fetch every page of one peripheral's store via addressed relay requests. */
-  const loadPeripheralPages = async (
+  /*
+   * Load one peripheral's store. The peripheral streams one entry per
+   * notification and terminates with list_done, so we just collect the stream
+   * addressed to that source. Returns null if the source reported an error.
+   */
+  const loadPeripheralEntries = async (
     service: ZMKCustomSubsystem,
-    source: number,
-    startOffset: number,
-    startEntries: SettingEntry[]
-  ): Promise<SettingEntry[]> => {
-    const collected = [...startEntries];
-    let offset = startOffset;
-    let hasMore = startOffset > 0; // caller passed a first page with more
-    for (let page = 0; hasMore && page < MAX_LIST_PAGES; page++) {
-      const replies = await sendTargeted(
-        service,
-        { list: { offset, limit: 0 } },
-        source,
-        "first",
-        NOTIFY_ONE_MS
-      );
-      const reply = replies.find((r) => r.source === source);
-      if (!reply || !reply.resp.list) break;
-      collected.push(...reply.resp.list.entries);
-      hasMore = reply.resp.list.hasMore;
-      offset = reply.resp.list.nextOffset || offset;
-    }
-    return collected;
+    source: number
+  ): Promise<SettingEntry[] | { error: string } | null> => {
+    const r = await sendTargeted(
+      service,
+      { list: { offset: 0, limit: 0 } },
+      source,
+      "list",
+      NOTIFY_ONE_MS
+    );
+    const err = r.responseBySource[source]?.error;
+    if (err) return { error: err.message };
+    if (r.entriesBySource[source]) return r.entriesBySource[source];
+    return null; // no reply (e.g. disconnected peripheral)
   };
 
   const refreshStorageInfo = async () => {
@@ -483,48 +487,31 @@ export function SettingsSection() {
       if (target === TARGET_CENTRAL) {
         await loadCentral();
       } else if (target === TARGET_ALL) {
-        /* Central via the reliable sync path; peripherals via one broadcast to
-         * discover them, then addressed pagination for any that have more. */
+        /* Central via the reliable sync path; peripherals stream over one
+         * broadcast, grouped by source (each source ends with list_done). */
         await loadCentral();
-        const first = await sendTargeted(
+        const r = await sendTargeted(
           service,
           { list: { offset: 0, limit: 0 } },
           TARGET_ALL,
           "collect",
           NOTIFY_COLLECT_MS
         );
-        for (const { source, resp } of first) {
-          if (source === TARGET_CENTRAL || !resp.list) continue; // central handled above
-          next[source] = await loadPeripheralPages(
-            service,
-            source,
-            resp.list.hasMore ? resp.list.nextOffset : 0,
-            resp.list.entries
-          );
+        for (const s of Object.keys(r.entriesBySource).map(Number)) {
+          if (s === TARGET_CENTRAL) continue; // central handled above
+          next[s] = r.entriesBySource[s];
           setSettingsBySource({ ...next });
         }
       } else {
         /* A single addressed peripheral. */
-        const first = await sendTargeted(
-          service,
-          { list: { offset: 0, limit: 0 } },
-          target,
-          "first",
-          NOTIFY_ONE_MS
-        );
-        const reply = first.find((r) => r.source === target) ?? first[0];
-        if (reply?.resp.error) {
-          setError(`Device error: ${reply.resp.error.message}`);
-        } else if (reply?.resp.list) {
-          next[target] = await loadPeripheralPages(
-            service,
-            target,
-            reply.resp.list.hasMore ? reply.resp.list.nextOffset : 0,
-            reply.resp.list.entries
-          );
-          setSettingsBySource({ ...next });
-        } else {
+        const entries = await loadPeripheralEntries(service, target);
+        if (entries === null) {
           setStatus(`No reply from ${targetLabel(target)}.`);
+        } else if ("error" in entries) {
+          setError(`Device error: ${entries.error}`);
+        } else {
+          next[target] = entries;
+          setSettingsBySource({ ...next });
         }
       }
     } catch (e) {
@@ -559,21 +546,8 @@ export function SettingsSection() {
       const entries = await loadCentralPages(service);
       setSettingsBySource((prev) => ({ ...prev, [source]: entries }));
     } else {
-      const first = await sendTargeted(
-        service,
-        { list: { offset: 0, limit: 0 } },
-        source,
-        "first",
-        NOTIFY_ONE_MS
-      );
-      const reply = first.find((r) => r.source === source) ?? first[0];
-      if (reply?.resp.list) {
-        const entries = await loadPeripheralPages(
-          service,
-          source,
-          reply.resp.list.hasMore ? reply.resp.list.nextOffset : 0,
-          reply.resp.list.entries
-        );
+      const entries = await loadPeripheralEntries(service, source);
+      if (Array.isArray(entries)) {
         setSettingsBySource((prev) => ({ ...prev, [source]: entries }));
       }
     }
@@ -607,15 +581,14 @@ export function SettingsSection() {
         );
         deviceError = resp.error?.message;
       } else {
-        const replies = await sendTargeted(
+        const r = await sendTargeted(
           service,
           { write: { key, ...typedFields } },
           source,
           "first",
           NOTIFY_ONE_MS
         );
-        deviceError = replies.find((r) => r.source === source)?.resp.error
-          ?.message;
+        deviceError = r.responseBySource[source]?.error?.message;
       }
       if (deviceError) {
         setEditError(`Device error: ${deviceError}`);
@@ -649,14 +622,14 @@ export function SettingsSection() {
           return;
         }
       } else {
-        const replies = await sendTargeted(
+        const r = await sendTargeted(
           service,
           { delete: { key } },
           source,
           "first",
           NOTIFY_ONE_MS
         );
-        const err = replies.find((r) => r.source === source)?.resp.error;
+        const err = r.responseBySource[source]?.error;
         if (err) {
           setError(`Delete failed: ${err.message}`);
           return;

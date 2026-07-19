@@ -33,15 +33,25 @@
  * populate @p resp. Does not touch Request.target / req_id -- targeting and
  * async delivery are the caller's concern.
  *
- * @param req              decoded request (one of the request_type oneof).
- * @param resp             response to fill (response_type oneof).
- * @param list_byte_budget for a `list` request, an upper bound in bytes on the
- *                         encoded entries of one page (the encoder stops early
- *                         and sets has_more once a further entry would exceed
- *                         it). 0 == unbounded (central Studio path, which
- *                         streams straight to the transport). The relay path
- *                         passes the reply buffer size so a page always fits.
+ * Used for the central's synchronous path and for the peripheral's answer to a
+ * non-`list` relayed request. A relayed `list` streams one entry at a time via
+ * setting_expose_entry_at() instead (see the split relay), so it does not go
+ * through here.
+ *
+ * @param req   decoded request (one of the request_type oneof).
+ * @param resp  response to fill (response_type oneof).
  * @return 0 on success, negative errno on failure (caller renders ErrorResponse).
  */
 int setting_expose_dispatch(const zmk_setting_expose_Request *req,
-                            zmk_setting_expose_Response *resp, uint32_t list_byte_budget);
+                            zmk_setting_expose_Response *resp);
+
+/**
+ * Fetch the @p index-th setting from the LOCAL store (0-based, iteration order)
+ * into @p out with its typed value. This backs the memory-frugal relayed
+ * `list`, which streams one SettingEntry per notification rather than buffering
+ * a page.
+ *
+ * @return 1 if an entry exists at @p index (and @p out is filled), 0 if @p index
+ *         is past the last entry, negative errno on error.
+ */
+int setting_expose_entry_at(uint32_t index, zmk_setting_expose_SettingEntry *out);

@@ -40,6 +40,9 @@ config ZMK_SETTING_EXPOSE_SPLIT
     # The peripheral answers relayed requests with the shared nanopb dispatch
     # but has no ZMK_STUDIO to pull nanopb in, so select it.
     select NANOPB
+    # Heavy relay work (decode/encode + Studio notifications) runs on ZMK's
+    # shared low-priority work queue, one item per cycle.
+    select ZMK_LOW_PRIORITY_WORK_QUEUE
     help
       On a split keyboard, let the ZMK Studio web UI address the peripheral
       half/halves via the Request `target` field: the central relays the
@@ -55,18 +58,6 @@ config ZMK_SETTING_EXPOSE_SPLIT
       central-only and avoid the extra relay characteristic and RAM.
 
 if ZMK_SETTING_EXPOSE_SPLIT
-
-config ZMK_SETTING_EXPOSE_RELAY_STACK_SIZE
-    int "Stack size (bytes) for the setting_expose relay work queue"
-    default 4096
-    help
-      The relay work queue decodes/encodes protobuf and -- on the central --
-      raises Studio RPC notifications, which synchronously build large
-      notification + response structs and run a double pb_encode. Doing that on
-      the shared system work queue (which the split relay receive path already
-      runs on) overflows its stack, so the relay hands the heavy work to its own
-      thread. Sized like the Studio RPC thread. Raise it if you see a stack
-      overflow in the "se_relay" thread.
 
 config ZMK_SETTING_EXPOSE_DELETE_ALL_TIMEOUT_MS
     int "Timeout (ms) waiting for peripheral replies before deleting the central"

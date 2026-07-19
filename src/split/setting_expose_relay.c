@@ -9,13 +9,21 @@
  *   central  --SEq (request)-->  peripheral   (CENTRAL_TO_PERIPHERAL + HANDLE)
  *   peripheral --SEr (reply)-->  central      (PERIPHERAL_TO_CENTRAL + HANDLE)
  *
- * The peripheral answers a relayed Request with the shared
- * setting_expose_dispatch against its OWN store and relays the encoded Response
- * back. The central forwards each reply to the connected Studio client as a
- * Notification, filtered by the pending request's target. A TARGET_ALL
- * delete/clear_all is special: the central deletes the peripherals first
- * (broadcast) and its OWN store last, only after every peripheral has replied
- * or a timeout elapses, then emits a Notification with complete=true.
+ * The peripheral answers a relayed non-`list` request with the shared
+ * setting_expose_dispatch against its OWN store; a `list` is streamed one
+ * SettingEntry per reply (plus a final list_done) so it never buffers a page.
+ * Each reply carries an encoded type-safe `Notification` event. The central
+ * stamps `source` on each reply and forwards it to the connected Studio client.
+ * A TARGET_ALL delete/clear_all is special: the central deletes the peripherals
+ * first (broadcast) and its OWN store last, only after every peripheral has
+ * replied or a timeout elapses, then emits a Notification with `complete`.
+ *
+ * All heavy work runs on ZMK's shared low-priority work queue, ONE notification
+ * (or one streamed entry) per work cycle: the Studio BLE GATT transport drains
+ * its TX ring buffer on that same queue, so emitting a burst without yielding
+ * would self-deadlock. Re-submitting the work item between items yields the
+ * queue so the transport can drain. All relay state is confined to this
+ * single-threaded queue, so it needs no locking.
  */
 
 #include <string.h>
@@ -26,6 +34,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 #include <zmk/event_manager.h>
+#include <zmk/workqueue.h>
 #include <zmk/setting_expose/setting_expose.pb.h>
 #include <zmk/setting_expose/dispatch.h>
 #include <zmk/setting_expose/relay.h>
@@ -53,27 +62,17 @@ ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(se_relay_reply, SEr, source)
 ZMK_RELAY_EVENT_HANDLE(se_relay_query, SEq, source)
 ZMK_RELAY_EVENT_HANDLE(se_relay_reply, SEr, source)
 
-/*
- * Dedicated work queue for the heavy half of the relay. The carriers are
- * re-raised locally by ZMK_RELAY_EVENT_HANDLE on the SYSTEM work queue, whose
- * ~2 KB spare stack is too small for the peripheral's decode+dispatch+encode
- * and -- worse -- the central's raise_zmk_studio_custom_notification (which
- * builds a full notification + response and double pb_encodes synchronously).
- * kscan-diagnostics observed a sysworkq stack overflow doing this inline, so we
- * hand the work to our own thread. All state below that is not touched by the
- * RPC thread is confined to this single-threaded queue, so it needs no locking.
- */
-static K_THREAD_STACK_DEFINE(se_relay_stack, CONFIG_ZMK_SETTING_EXPOSE_RELAY_STACK_SIZE);
-static struct k_work_q se_relay_workq;
-
-static int se_relay_workq_init(void) {
-    struct k_work_queue_config cfg = {.name = "se_relay"};
-    k_work_queue_start(&se_relay_workq, se_relay_stack, K_THREAD_STACK_SIZEOF(se_relay_stack),
-                       K_LOWEST_APPLICATION_THREAD_PRIO, &cfg);
-    return 0;
+/* Encode one Notification event into a relay reply and ship it to the central. */
+static void se_relay_send_reply(uint8_t req_id, const zmk_setting_expose_Notification *n) {
+    struct se_relay_reply reply = {.source = ZMK_RELAY_EVENT_SOURCE_SELF, .req_id = req_id};
+    pb_ostream_t os = pb_ostream_from_buffer(reply.data, sizeof(reply.data));
+    if (!pb_encode(&os, zmk_setting_expose_Notification_fields, n)) {
+        LOG_ERR("Failed to encode relay notification: %s", PB_GET_ERROR(&os));
+        return;
+    }
+    reply.len = (uint16_t)os.bytes_written;
+    raise_se_relay_reply(reply);
 }
-
-SYS_INIT(se_relay_workq_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 /* ---- Peripheral side: answer relayed requests --------------------------- */
 
@@ -83,10 +82,48 @@ K_MSGQ_DEFINE(se_relay_query_msgq, sizeof(struct se_relay_query), 4, 4);
 
 static zmk_setting_expose_Request answer_req;
 static zmk_setting_expose_Response answer_resp;
-static struct se_relay_reply answer_reply;
+static zmk_setting_expose_Notification answer_notif;
 static struct se_relay_query answer_query;
 
-static void se_relay_answer_work(struct k_work *work) {
+/*
+ * State for an in-progress streamed `list`. Streaming one entry per work cycle
+ * keeps peripheral RAM tiny (no page buffer) and paces the relay link. Only one
+ * stream at a time -- the central serializes requests.
+ */
+static struct {
+    bool active;
+    uint8_t req_id;
+    uint32_t offset;
+} pstream;
+
+static void se_relay_stream_work_handler(struct k_work *work);
+static K_WORK_DEFINE(se_relay_stream_work, se_relay_stream_work_handler);
+
+static void se_relay_stream_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    if (!pstream.active) {
+        return;
+    }
+
+    answer_notif = (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
+    answer_notif.req_id = pstream.req_id;
+
+    int rc = setting_expose_entry_at(pstream.offset, &answer_notif.event.entry);
+    if (rc == 1) {
+        answer_notif.which_event = zmk_setting_expose_Notification_entry_tag;
+        se_relay_send_reply(pstream.req_id, &answer_notif);
+        pstream.offset++;
+        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &se_relay_stream_work);
+    } else {
+        /* Past the last entry (or read error): terminate the stream. */
+        answer_notif.which_event = zmk_setting_expose_Notification_list_done_tag;
+        se_relay_send_reply(pstream.req_id, &answer_notif);
+        pstream.active = false;
+    }
+}
+
+static void se_relay_answer_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
     while (k_msgq_get(&se_relay_query_msgq, &answer_query, K_NO_WAIT) == 0) {
         answer_req = (zmk_setting_expose_Request)zmk_setting_expose_Request_init_zero;
         pb_istream_t is = pb_istream_from_buffer(answer_query.data, answer_query.len);
@@ -95,32 +132,34 @@ static void se_relay_answer_work(struct k_work *work) {
             continue;
         }
 
+        if (answer_req.which_request_type == zmk_setting_expose_Request_list_tag) {
+            /* Stream the whole store one entry per cycle. */
+            pstream.active = true;
+            pstream.req_id = answer_query.req_id;
+            pstream.offset = 0;
+            k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &se_relay_stream_work);
+            continue;
+        }
+
+        /* Everything else is a single Response wrapped in one Notification. */
         answer_resp = (zmk_setting_expose_Response)zmk_setting_expose_Response_init_zero;
-        int rc = setting_expose_dispatch(&answer_req, &answer_resp, SE_RELAY_LIST_BUDGET);
+        int rc = setting_expose_dispatch(&answer_req, &answer_resp);
         if (rc != 0) {
-            /* Report the failure to the client as an ErrorResponse. */
             answer_resp = (zmk_setting_expose_Response)zmk_setting_expose_Response_init_zero;
             answer_resp.which_response_type = zmk_setting_expose_Response_error_tag;
             snprintf(answer_resp.response_type.error.message,
                      sizeof(answer_resp.response_type.error.message), "Error: %d", rc);
         }
 
-        answer_reply = (struct se_relay_reply){
-            .source = ZMK_RELAY_EVENT_SOURCE_SELF,
-            .req_id = answer_query.req_id,
-        };
-        pb_ostream_t os = pb_ostream_from_buffer(answer_reply.data, sizeof(answer_reply.data));
-        if (!pb_encode(&os, zmk_setting_expose_Response_fields, &answer_resp)) {
-            LOG_ERR("Failed to encode relayed setting_expose reply: %s", PB_GET_ERROR(&os));
-            continue;
-        }
-        answer_reply.len = (uint16_t)os.bytes_written;
-
-        raise_se_relay_reply(answer_reply);
+        answer_notif = (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
+        answer_notif.req_id = answer_query.req_id;
+        answer_notif.which_event = zmk_setting_expose_Notification_response_tag;
+        answer_notif.event.response = answer_resp;
+        se_relay_send_reply(answer_query.req_id, &answer_notif);
     }
 }
 
-static K_WORK_DEFINE(se_relay_answer_work_item, se_relay_answer_work);
+static K_WORK_DEFINE(se_relay_answer_work, se_relay_answer_work_handler);
 
 static int se_relay_on_query(const zmk_event_t *eh) {
     const struct se_relay_query *query = as_se_relay_query(eh);
@@ -131,7 +170,7 @@ static int se_relay_on_query(const zmk_event_t *eh) {
         LOG_WRN("setting_expose relay query queue full, dropping query");
         return ZMK_EV_EVENT_BUBBLE;
     }
-    k_work_submit_to_queue(&se_relay_workq, &se_relay_answer_work_item);
+    k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &se_relay_answer_work);
     return ZMK_EV_EVENT_HANDLED;
 }
 
@@ -175,9 +214,8 @@ static struct {
 /*
  * Active TARGET_ALL delete/clear_all transaction. All fields are touched ONLY
  * on the relay work queue (the reply notify work and the timeout both run
- * there, single-threaded), except `active`/`req_id`/`expected`/`op` which the
- * RPC thread sets once before raising the query (happens-before the first
- * reply). See DESIGN.md for the ordering guarantee.
+ * there, single-threaded), except the ones the RPC thread sets once before
+ * raising the query (happens-before the first reply). See DESIGN.md.
  */
 static struct {
     bool active;
@@ -187,6 +225,8 @@ static struct {
     zmk_setting_expose_Request central_req; /* delete/clear_all to run on the central last */
 } del_tx;
 
+static zmk_setting_expose_Notification notify_event;
+
 static bool se_relay_encode_notification(pb_ostream_t *stream, const pb_field_t *field,
                                          void *const *arg) {
     const zmk_setting_expose_Notification *event = (const zmk_setting_expose_Notification *)*arg;
@@ -194,28 +234,13 @@ static bool se_relay_encode_notification(pb_ostream_t *stream, const pb_field_t 
         stream, field, zmk_setting_expose_Notification_fields, event);
 }
 
-/* Raise one Notification. Runs on the relay work queue (see stack note). */
-static zmk_setting_expose_Notification notify_event;
-
-static void se_relay_emit(uint8_t source, uint8_t req_id, const uint8_t *payload,
-                          size_t payload_len, bool complete) {
+/* Emit the current notify_event to the connected Studio client. */
+static void se_relay_emit(void) {
     int index = se_relay_subsystem_index();
     if (index < 0) {
         LOG_WRN("setting_expose subsystem not registered, dropping notification");
         return;
     }
-
-    notify_event = (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
-    notify_event.source = source;
-    notify_event.req_id = req_id;
-    notify_event.complete = complete;
-    notify_event.payload.size = (pb_size_t)MIN(payload_len, sizeof(notify_event.payload.bytes));
-    if (payload != NULL && notify_event.payload.size > 0) {
-        memcpy(notify_event.payload.bytes, payload, notify_event.payload.size);
-    }
-
-    /* encode_payload runs inline within raise_zmk_studio_custom_notification,
-     * so pointing at the (static) notify_event is safe. */
     raise_zmk_studio_custom_notification((struct zmk_studio_custom_notification){
         .subsystem_index = (uint8_t)index,
         .encode_payload =
@@ -226,14 +251,13 @@ static void se_relay_emit(uint8_t source, uint8_t req_id, const uint8_t *payload
     });
 }
 
+static struct k_work_delayable se_relay_delete_timeout;
+
 /*
  * Finish an active delete-all transaction: delete the central's OWN store last,
  * then emit the completion notification. Idempotent (clears `active` first) and
  * only ever called on the relay work queue.
  */
-static struct k_work_delayable se_relay_delete_timeout;
-static zmk_setting_expose_Response se_central_delete_resp;
-
 static void se_relay_finish_delete(void) {
     if (!del_tx.active) {
         return;
@@ -241,27 +265,19 @@ static void se_relay_finish_delete(void) {
     del_tx.active = false;
     k_work_cancel_delayable(&se_relay_delete_timeout);
 
-    se_central_delete_resp = (zmk_setting_expose_Response)zmk_setting_expose_Response_init_zero;
-    int rc = setting_expose_dispatch(&del_tx.central_req, &se_central_delete_resp, 0);
+    zmk_setting_expose_Response resp = zmk_setting_expose_Response_init_zero;
+    int rc = setting_expose_dispatch(&del_tx.central_req, &resp);
     if (rc != 0) {
-        se_central_delete_resp = (zmk_setting_expose_Response)zmk_setting_expose_Response_init_zero;
-        se_central_delete_resp.which_response_type = zmk_setting_expose_Response_error_tag;
-        snprintf(se_central_delete_resp.response_type.error.message,
-                 sizeof(se_central_delete_resp.response_type.error.message), "Error: %d", rc);
-    }
-
-    static uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
-    pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
-    size_t len = 0;
-    if (pb_encode(&os, zmk_setting_expose_Response_fields, &se_central_delete_resp)) {
-        len = os.bytes_written;
-    } else {
-        LOG_ERR("Failed to encode central delete response: %s", PB_GET_ERROR(&os));
+        LOG_WRN("central delete during delete-all failed: %d", rc);
     }
 
     LOG_DBG("delete-all complete (req_id=%u, %u peripheral replies)", del_tx.req_id,
             del_tx.received);
-    se_relay_emit(0, del_tx.req_id, buf, len, true);
+    notify_event = (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
+    notify_event.source = 0;
+    notify_event.req_id = del_tx.req_id;
+    notify_event.which_event = zmk_setting_expose_Notification_complete_tag;
+    se_relay_emit();
 }
 
 static void se_relay_delete_timeout_work(struct k_work *work) {
@@ -273,29 +289,47 @@ static void se_relay_delete_timeout_work(struct k_work *work) {
     }
 }
 
-/* ---- Reply notify path (relay work queue) ---- */
+/* ---- Reply notify path (low-priority work queue, one per cycle) ---- */
 
 K_MSGQ_DEFINE(se_relay_reply_msgq, sizeof(struct se_relay_reply), 8, 4);
 static struct se_relay_reply notify_reply;
 
-static void se_relay_notify_work(struct k_work *work) {
-    ARG_UNUSED(work);
-    while (k_msgq_get(&se_relay_reply_msgq, &notify_reply, K_NO_WAIT) == 0) {
-        /* Forward the peripheral's answer to the client. */
-        se_relay_emit(notify_reply.source, notify_reply.req_id, notify_reply.data, notify_reply.len,
-                      false);
+static void se_relay_notify_work_handler(struct k_work *work);
+static K_WORK_DEFINE(se_relay_notify_work, se_relay_notify_work_handler);
 
-        /* Count it toward an active delete-all and finish once all are in. */
-        if (del_tx.active && notify_reply.req_id == del_tx.req_id) {
-            del_tx.received++;
-            if (del_tx.received >= del_tx.expected) {
-                se_relay_finish_delete();
-            }
+static void se_relay_notify_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    if (k_msgq_get(&se_relay_reply_msgq, &notify_reply, K_NO_WAIT) != 0) {
+        return;
+    }
+
+    /* Decode the peripheral's Notification, stamp the real source, forward it. */
+    notify_event = (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
+    pb_istream_t is = pb_istream_from_buffer(notify_reply.data, notify_reply.len);
+    if (pb_decode(&is, zmk_setting_expose_Notification_fields, &notify_event)) {
+        notify_event.source = notify_reply.source;
+        notify_event.req_id = notify_reply.req_id;
+        se_relay_emit();
+    } else {
+        LOG_WRN("Failed to decode relayed notification: %s", PB_GET_ERROR(&is));
+    }
+
+    /* Count a delete-all reply and finish once every peripheral has answered.
+     * A delete/clear_all yields exactly one reply per peripheral (a Response),
+     * never a list stream, so counting replies is correct. */
+    if (del_tx.active && notify_reply.req_id == del_tx.req_id) {
+        del_tx.received++;
+        if (del_tx.received >= del_tx.expected) {
+            se_relay_finish_delete();
         }
     }
-}
 
-static K_WORK_DEFINE(se_relay_notify_work_item, se_relay_notify_work);
+    /* One item per cycle: yield to let the BLE transport drain, then continue. */
+    if (k_msgq_num_used_get(&se_relay_reply_msgq) > 0) {
+        k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &se_relay_notify_work);
+    }
+}
 
 static int se_relay_on_reply(const zmk_event_t *eh) {
     const struct se_relay_reply *reply = as_se_relay_reply(eh);
@@ -313,45 +347,12 @@ static int se_relay_on_reply(const zmk_event_t *eh) {
         LOG_WRN("setting_expose relay reply queue full, dropping reply");
         return ZMK_EV_EVENT_BUBBLE;
     }
-    k_work_submit_to_queue(&se_relay_workq, &se_relay_notify_work_item);
+    k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &se_relay_notify_work);
     return ZMK_EV_EVENT_HANDLED;
 }
 
 ZMK_LISTENER(se_relay_notify, se_relay_on_reply);
 ZMK_SUBSCRIPTION(se_relay_notify, se_relay_reply);
-
-/* ---- Central-own contribution for TARGET_ALL (non-delete ops) ---- */
-
-/*
- * Enqueue the central's OWN result as a source-0 reply so it flows through the
- * exact same notify path as the peripheral replies. Runs on the RPC thread.
- */
-static zmk_setting_expose_Response se_central_resp;
-
-static void se_relay_emit_central_own(const zmk_setting_expose_Request *req, uint8_t req_id) {
-    se_central_resp = (zmk_setting_expose_Response)zmk_setting_expose_Response_init_zero;
-    int rc = setting_expose_dispatch(req, &se_central_resp, SE_RELAY_LIST_BUDGET);
-    if (rc != 0) {
-        se_central_resp = (zmk_setting_expose_Response)zmk_setting_expose_Response_init_zero;
-        se_central_resp.which_response_type = zmk_setting_expose_Response_error_tag;
-        snprintf(se_central_resp.response_type.error.message,
-                 sizeof(se_central_resp.response_type.error.message), "Error: %d", rc);
-    }
-
-    struct se_relay_reply own = {.source = 0, .req_id = req_id};
-    pb_ostream_t os = pb_ostream_from_buffer(own.data, sizeof(own.data));
-    if (!pb_encode(&os, zmk_setting_expose_Response_fields, &se_central_resp)) {
-        LOG_ERR("Failed to encode central-own response: %s", PB_GET_ERROR(&os));
-        return;
-    }
-    own.len = (uint16_t)os.bytes_written;
-
-    if (k_msgq_put(&se_relay_reply_msgq, &own, K_NO_WAIT) != 0) {
-        LOG_WRN("setting_expose relay reply queue full, dropping central-own result");
-        return;
-    }
-    k_work_submit_to_queue(&se_relay_workq, &se_relay_notify_work_item);
-}
 
 /* ---- Central entry point (RPC thread) ---- */
 
@@ -368,7 +369,7 @@ int setting_expose_relay_dispatch(const zmk_setting_expose_Request *req,
     pending.req_id = req_id;
     pending.target = req->target;
 
-    /* Broadcast the request (minus nothing -- the peripheral ignores target). */
+    /* Broadcast the request (the peripheral ignores target). */
     struct se_relay_query query = {.source = ZMK_RELAY_EVENT_SOURCE_SELF, .req_id = req_id};
     pb_ostream_t os = pb_ostream_from_buffer(query.data, sizeof(query.data));
     if (!pb_encode(&os, zmk_setting_expose_Request_fields, req)) {
@@ -396,15 +397,10 @@ int setting_expose_relay_dispatch(const zmk_setting_expose_Request *req,
         raise_se_relay_query(query);
 
         k_work_schedule_for_queue(
-            &se_relay_workq, &se_relay_delete_timeout,
+            zmk_workqueue_lowprio_work_q(), &se_relay_delete_timeout,
             K_MSEC(del_tx.expected == 0 ? 0 : CONFIG_ZMK_SETTING_EXPOSE_DELETE_ALL_TIMEOUT_MS));
     } else {
         raise_se_relay_query(query);
-
-        /* TARGET_ALL non-delete ops also report the central's own store. */
-        if (req->target == SETTING_EXPOSE_TARGET_ALL) {
-            se_relay_emit_central_own(req, req_id);
-        }
     }
 
     resp->which_response_type = zmk_setting_expose_Response_ack_tag;

@@ -631,7 +631,7 @@ static bool test_dispatch_roundtrip(void) {
     wreq.request_type.write.typed_value.bytes_value.size = sizeof(val);
 
     zmk_setting_expose_Response wresp = zmk_setting_expose_Response_init_zero;
-    if (setting_expose_dispatch(&wreq, &wresp, SE_RELAY_LIST_BUDGET) != 0) {
+    if (setting_expose_dispatch(&wreq, &wresp) != 0) {
         return false;
     }
     if (wresp.which_response_type != zmk_setting_expose_Response_write_tag) {
@@ -643,71 +643,85 @@ static bool test_dispatch_roundtrip(void) {
     strncpy(rreq.request_type.read.key, key, sizeof(rreq.request_type.read.key) - 1);
 
     zmk_setting_expose_Response rresp = zmk_setting_expose_Response_init_zero;
-    if (setting_expose_dispatch(&rreq, &rresp, SE_RELAY_LIST_BUDGET) != 0) {
+    if (setting_expose_dispatch(&rreq, &rresp) != 0) {
         return false;
     }
 
-    /* Encode the Response into the relay-sized buffer, decode it back (this is
-     * exactly what the peripheral relay path does before shipping the reply). */
+    /* Wrap the Response in a Notification and encode into the relay-sized buffer,
+     * then decode it back -- exactly what the peripheral relay path does before
+     * shipping a non-list reply. */
+    zmk_setting_expose_Notification n = zmk_setting_expose_Notification_init_zero;
+    n.which_event = zmk_setting_expose_Notification_response_tag;
+    n.event.response = rresp;
+
     uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
     pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
-    if (!pb_encode(&os, zmk_setting_expose_Response_fields, &rresp)) {
+    if (!pb_encode(&os, zmk_setting_expose_Notification_fields, &n)) {
         return false;
     }
-    zmk_setting_expose_Response decoded = zmk_setting_expose_Response_init_zero;
+    zmk_setting_expose_Notification decoded = zmk_setting_expose_Notification_init_zero;
     pb_istream_t is = pb_istream_from_buffer(buf, os.bytes_written);
-    if (!pb_decode(&is, zmk_setting_expose_Response_fields, &decoded)) {
+    if (!pb_decode(&is, zmk_setting_expose_Notification_fields, &decoded)) {
         return false;
     }
     /* Unregistered keys read back as raw bytes. */
-    return decoded.which_response_type == zmk_setting_expose_Response_read_tag &&
-           decoded.response_type.read.which_typed_value ==
+    return decoded.which_event == zmk_setting_expose_Notification_response_tag &&
+           decoded.event.response.which_response_type == zmk_setting_expose_Response_read_tag &&
+           decoded.event.response.response_type.read.which_typed_value ==
                zmk_setting_expose_ReadResponse_bytes_value_tag &&
-           decoded.response_type.read.typed_value.bytes_value.size == sizeof(val) &&
-           memcmp(decoded.response_type.read.typed_value.bytes_value.bytes, val, sizeof(val)) == 0;
+           decoded.event.response.response_type.read.typed_value.bytes_value.size == sizeof(val) &&
+           memcmp(decoded.event.response.response_type.read.typed_value.bytes_value.bytes, val,
+                  sizeof(val)) == 0;
 }
 
 /*
- * A relayed list page must fit the reply buffer regardless of entry count. The
- * byte-budget guard should stop packing before it overflows and report
- * has_more, while a whole page still encodes within SE_RELAY_REPLY_DATA_MAX.
+ * The relayed list streams one entry per notification via setting_expose_entry_at.
+ * Verify sequential fetch returns each stored key exactly once and reports
+ * end-of-stream (0) past the last index, with each entry encodable into the
+ * relay reply buffer.
  */
-static bool test_relay_list_budget(void) {
-    /* Start empty, then add several large-valued entries. */
+static bool test_entry_at_streaming(void) {
+    /* Start from a known-empty store. */
     zmk_setting_expose_Request creq = zmk_setting_expose_Request_init_zero;
     creq.which_request_type = zmk_setting_expose_Request_clear_all_tag;
     zmk_setting_expose_Response cresp = zmk_setting_expose_Response_init_zero;
-    if (setting_expose_dispatch(&creq, &cresp, 0) != 0) {
+    if (setting_expose_dispatch(&creq, &cresp) != 0) {
         return false;
     }
 
-    uint8_t big[200];
-    memset(big, 0xAB, sizeof(big));
-    for (int i = 0; i < 4; i++) {
-        char key[] = "bg/0";
+    const int N = 3;
+    for (int i = 0; i < N; i++) {
+        char key[] = "st/0";
         key[3] = (char)('0' + i);
-        if (settings_save_one(key, big, sizeof(big)) != 0) {
+        uint8_t v = (uint8_t)i;
+        if (settings_save_one(key, &v, 1) != 0) {
             return false;
         }
     }
 
-    zmk_setting_expose_Request lreq = zmk_setting_expose_Request_init_zero;
-    lreq.which_request_type = zmk_setting_expose_Request_list_tag;
-    lreq.request_type.list.limit = 0; /* "all"; the byte budget must still bound the page */
-
-    zmk_setting_expose_Response lresp = zmk_setting_expose_Response_init_zero;
-    if (setting_expose_dispatch(&lreq, &lresp, SE_RELAY_LIST_BUDGET) != 0) {
-        return false;
+    int seen = 0;
+    for (uint32_t idx = 0; idx < (uint32_t)N + 2; idx++) {
+        zmk_setting_expose_SettingEntry entry = zmk_setting_expose_SettingEntry_init_zero;
+        int rc = setting_expose_entry_at(idx, &entry);
+        if (idx < (uint32_t)N) {
+            if (rc != 1 || strncmp(entry.key, "st/", 3) != 0) {
+                return false;
+            }
+            /* One entry must always fit the relay reply buffer. */
+            zmk_setting_expose_Notification n = zmk_setting_expose_Notification_init_zero;
+            n.which_event = zmk_setting_expose_Notification_entry_tag;
+            n.event.entry = entry;
+            uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
+            pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
+            if (!pb_encode(&os, zmk_setting_expose_Notification_fields, &n)) {
+                return false;
+            }
+            seen++;
+        } else if (rc != 0) {
+            return false; /* past the end must report end-of-stream */
+        }
     }
-
-    uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
-    pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
-    if (!pb_encode(&os, zmk_setting_expose_Response_fields, &lresp)) {
-        return false; /* must fit the relay buffer */
-    }
-    /* 4 x ~210 B entries cannot all fit a ~460 B budget: expect a partial page. */
-    return lresp.response_type.list.has_more && lresp.response_type.list.next_offset > 0 &&
-           lresp.response_type.list.next_offset < 4;
+    return seen == N;
 }
 
 /* ---- Boot-time test runner ---------------------------------------------- */
@@ -739,7 +753,7 @@ static int setting_expose_unit_tests(void) {
     RUN_TEST(pagination, test_pagination(sub));
     RUN_TEST(target_all_fallback, test_target_all_fallback(sub));
     RUN_TEST(dispatch_roundtrip, test_dispatch_roundtrip());
-    RUN_TEST(relay_list_budget, test_relay_list_budget());
+    RUN_TEST(entry_at_streaming, test_entry_at_streaming());
 
     LOG_INF("setting_expose_test: done");
     return 0;

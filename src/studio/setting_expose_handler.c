@@ -56,7 +56,7 @@ static bool setting_expose_rpc_handle_request(const zmk_custom_CallRequest *raw_
     int rc;
     if (req.target == SETTING_EXPOSE_TARGET_CENTRAL) {
         /* Central-only: handle locally and answer synchronously (unchanged). */
-        rc = setting_expose_dispatch(&req, resp, 0);
+        rc = setting_expose_dispatch(&req, resp);
     } else {
 #if IS_ENABLED(CONFIG_ZMK_SETTING_EXPOSE_SPLIT)
         /*
@@ -70,7 +70,7 @@ static bool setting_expose_rpc_handle_request(const zmk_custom_CallRequest *raw_
          * No split relay in this build: a targeted request degenerates to the
          * local store so a single-board web UI using TARGET_ALL still works.
          */
-        rc = setting_expose_dispatch(&req, resp, 0);
+        rc = setting_expose_dispatch(&req, resp);
 #endif
     }
 

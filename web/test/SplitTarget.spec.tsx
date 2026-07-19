@@ -34,20 +34,8 @@ function rpcReply(resp: Parameters<typeof Response.create>[0]) {
 }
 
 /** A CustomNotification carrying an encoded setting_expose Notification. */
-function notif(
-  source: number,
-  reqId: number,
-  resp: Parameters<typeof Response.create>[0] | null,
-  complete = false
-) {
-  const payload = resp
-    ? Response.encode(Response.create(resp)).finish()
-    : new Uint8Array();
-  return {
-    payload: Notification.encode(
-      Notification.create({ source, reqId, payload, complete })
-    ).finish(),
-  };
+function notif(n: Parameters<typeof Notification.create>[0]) {
+  return { payload: Notification.encode(Notification.create(n)).finish() };
 }
 
 /**
@@ -131,14 +119,11 @@ describe("split target support", () => {
       .mockResolvedValueOnce(rpcReply({ storageInfo: {} }));
     await user.click(screen.getByRole("button", { name: /Load Settings/i }));
 
+    // The peripheral streams one entry per notification, then list_done.
     emit(
-      notif(1, 1, {
-        list: {
-          entries: [{ key: "p/two", stringValue: "hi" }],
-          hasMore: false,
-        },
-      })
+      notif({ source: 1, reqId: 1, entry: { key: "p/two", stringValue: "hi" } })
     );
+    emit(notif({ source: 1, reqId: 1, listDone: {} }));
 
     await waitFor(() => expect(screen.getByText("p/two")).toBeInTheDocument());
     // Both halves now present -> source headers + display filter appear.
@@ -185,8 +170,8 @@ describe("split target support", () => {
 
     await user.click(screen.getByRole("button", { name: /Clear All/i }));
     // Peripheral deletes first, then the central completes the operation.
-    emit(notif(1, 1, { delete: {} }));
-    emit(notif(0, 1, { clearAll: {} }, true));
+    emit(notif({ source: 1, reqId: 1, response: { delete: {} } }));
+    emit(notif({ source: 0, reqId: 1, complete: {} }));
 
     await waitFor(() =>
       expect(screen.getByText(/Cleared All halves/i)).toBeInTheDocument()
