@@ -6,14 +6,40 @@ import {
   ZMKCustomSubsystem,
   ZMKAppContext,
 } from "@cormoran/zmk-studio-react-hook";
+import type { NotificationSubscription } from "@cormoran/zmk-studio-react-hook";
 import {
   Request,
   Response,
+  Notification,
   SettingEntry,
   StorageInfoResponse,
 } from "./proto/zmk/setting_expose/setting_expose";
 
 export const SUBSYSTEM_IDENTIFIER = "zmk__setting_expose";
+
+// ---- Split targeting ------------------------------------------------------
+
+/** Request.target values (mirror proto Target). */
+const TARGET_CENTRAL = 0;
+const TARGET_ALL = 0xffff;
+
+/** How many peripheral slots the target selector offers. */
+const MAX_PERIPHERALS = 4;
+
+/** Display source values used by the display filter ("all" == every source). */
+type DisplaySource = number | "all";
+
+/** Human label for a reply source (0 = central, 1.. = peripheral index). */
+function sourceLabel(source: number): string {
+  return source === TARGET_CENTRAL ? "Central" : `Peripheral ${source}`;
+}
+
+/** Human label for a request target. */
+function targetLabel(target: number): string {
+  if (target === TARGET_CENTRAL) return "Central";
+  if (target === TARGET_ALL) return "All halves";
+  return `Peripheral ${target}`;
+}
 
 // ---- Type helpers ---------------------------------------------------------
 
@@ -124,6 +150,22 @@ const LIST_PAGE_SIZE = 32;
 /** Hard cap on list pages to avoid an infinite loop on a misbehaving device. */
 const MAX_LIST_PAGES = 10000;
 
+/**
+ * How long to collect asynchronous peripheral notifications for a broadcast
+ * (target = all) before assuming every connected half has answered. ZMK gives
+ * no reliable connected-peripheral count, so this is time-boxed.
+ */
+const NOTIFY_COLLECT_MS = 1500;
+
+/** Per-target notification wait for a single addressed half. */
+const NOTIFY_ONE_MS = 4000;
+
+/**
+ * Wait for a target = all delete/clear_all to finish. Slightly longer than the
+ * firmware's CONFIG_ZMK_SETTING_EXPOSE_DELETE_ALL_TIMEOUT_MS (default 3s).
+ */
+const DELETE_ALL_WAIT_MS = 6000;
+
 async function callRPC(
   service: ZMKCustomSubsystem,
   request: Request,
@@ -138,6 +180,15 @@ async function callRPC(
   }
   return Response.decode(responsePayload);
 }
+
+/** One asynchronous reply gathered from a targeted request. */
+type SourceResult = { source: number; resp: Response };
+
+/** Registered collector for the notifications of one in-flight targeted request. */
+type Collector = {
+  onResponse: (source: number, resp: Response) => void;
+  onComplete: () => void;
+};
 
 // ---- App ------------------------------------------------------------------
 
@@ -200,10 +251,17 @@ function App() {
 
 export function SettingsSection() {
   const zmkApp = useContext(ZMKAppContext);
-  const [settings, setSettings] = useState<SettingEntry[]>([]);
+  /* Loaded settings keyed by reply source (0 = central, 1.. = peripheral). */
+  const [settingsBySource, setSettingsBySource] = useState<
+    Record<number, SettingEntry[]>
+  >({});
+  const [target, setTarget] = useState<number>(TARGET_CENTRAL);
+  const [displayFilter, setDisplayFilter] = useState<DisplaySource>("all");
   const [isLoading, setIsLoading] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editEntry, setEditEntry] = useState<SettingEntry | null>(null);
+  const [editSource, setEditSource] = useState<number>(TARGET_CENTRAL);
   const [editValue, setEditValue] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -214,6 +272,10 @@ export function SettingsSection() {
   const [isClearing, setIsClearing] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  /* Monotonic request id (kept in the firmware's 1-byte echo range). */
+  const reqCounter = useRef(0);
+  /* In-flight notification collectors keyed by request id. */
+  const collectors = useRef<Map<number, Collector>>(new Map());
 
   const subsystem = zmkApp?.findSubsystem(SUBSYSTEM_IDENTIFIER);
 
@@ -222,12 +284,104 @@ export function SettingsSection() {
     return new ZMKCustomSubsystem(zmkApp.state.connection, subsystem.index);
   }, [zmkApp, subsystem]);
 
+  /* Subscribe to firmware notifications carrying peripheral (and central-own)
+   * replies. Each notification is routed to the collector for its request id. */
+  useEffect(() => {
+    if (!zmkApp?.onNotification || !subsystem) return;
+    const sub: Extract<NotificationSubscription, { type: "custom" }> = {
+      type: "custom",
+      subsystemIndex: subsystem.index,
+      callback: (notif) => {
+        let n;
+        try {
+          n = Notification.decode(notif.payload);
+        } catch {
+          return;
+        }
+        const c = collectors.current.get(n.reqId);
+        if (!c) return;
+        if (n.payload && n.payload.length > 0) {
+          try {
+            c.onResponse(n.source, Response.decode(n.payload));
+          } catch {
+            /* ignore malformed payloads */
+          }
+        }
+        if (n.complete) c.onComplete();
+      },
+    };
+    const unsub = zmkApp.onNotification(sub);
+    return typeof unsub === "function" ? unsub : undefined;
+  }, [zmkApp, subsystem]);
+
   /* Auto-focus the edit input whenever a new entry is being edited */
   useEffect(() => {
     if (editEntry) {
       inputRef.current?.focus();
     }
   }, [editEntry]);
+
+  const nextReqId = () => {
+    reqCounter.current = (reqCounter.current % 255) + 1;
+    return reqCounter.current;
+  };
+
+  /*
+   * Send a targeted request and gather the asynchronous per-half replies.
+   *
+   *   - On a split central the request returns an Ack and the actual results
+   *     arrive as notifications; we collect them per `mode`.
+   *   - On a build without split relay the request returns the real Response
+   *     directly (central-only fallback); we surface it as source 0.
+   *
+   * mode: "first" resolves on the first reply (one addressed half); "collect"
+   * waits a fixed window for every half; "complete" waits for the completion
+   * notification (target = all delete/clear_all).
+   */
+  const sendTargeted = useCallback(
+    async (
+      service: ZMKCustomSubsystem,
+      fields: Partial<Request>,
+      reqTarget: number,
+      mode: "first" | "collect" | "complete",
+      timeout: number
+    ): Promise<SourceResult[]> => {
+      const reqId = nextReqId();
+      const results: SourceResult[] = [];
+
+      const collected = new Promise<void>((resolve) => {
+        const done = () => {
+          collectors.current.delete(reqId);
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(done, timeout);
+        collectors.current.set(reqId, {
+          onResponse: (source, resp) => {
+            results.push({ source, resp });
+            if (mode === "first") done();
+          },
+          onComplete: () => {
+            if (mode === "complete") done();
+          },
+        });
+      });
+
+      const ack = await callRPC(
+        service,
+        Request.create({ ...fields, target: reqTarget, reqId }),
+        { timeout }
+      );
+      if (ack.ack === undefined) {
+        /* Central-only fallback (or an error): the sync response IS the result. */
+        collectors.current.delete(reqId);
+        return [{ source: 0, resp: ack }];
+      }
+      await collected;
+      return results;
+    },
+    []
+  );
 
   if (!zmkApp) return null;
 
@@ -245,39 +399,133 @@ export function SettingsSection() {
     );
   }
 
+  /* Fetch every page of the central's own store synchronously. */
+  const loadCentralPages = async (
+    service: ZMKCustomSubsystem
+  ): Promise<SettingEntry[]> => {
+    const collected: SettingEntry[] = [];
+    let offset = 0;
+    for (let page = 0; page < MAX_LIST_PAGES; page++) {
+      const resp = await callRPC(
+        service,
+        Request.create({
+          list: { offset, limit: LIST_PAGE_SIZE },
+          target: TARGET_CENTRAL,
+        })
+      );
+      if (resp.error) {
+        throw new Error(resp.error.message);
+      }
+      if (!resp.list) break;
+      collected.push(...resp.list.entries);
+      if (!resp.list.hasMore || resp.list.entries.length === 0) break;
+      offset = resp.list.nextOffset || offset + resp.list.entries.length;
+    }
+    return collected;
+  };
+
+  /* Fetch every page of one peripheral's store via addressed relay requests. */
+  const loadPeripheralPages = async (
+    service: ZMKCustomSubsystem,
+    source: number,
+    startOffset: number,
+    startEntries: SettingEntry[]
+  ): Promise<SettingEntry[]> => {
+    const collected = [...startEntries];
+    let offset = startOffset;
+    let hasMore = startOffset > 0; // caller passed a first page with more
+    for (let page = 0; hasMore && page < MAX_LIST_PAGES; page++) {
+      const replies = await sendTargeted(
+        service,
+        { list: { offset, limit: 0 } },
+        source,
+        "first",
+        NOTIFY_ONE_MS
+      );
+      const reply = replies.find((r) => r.source === source);
+      if (!reply || !reply.resp.list) break;
+      collected.push(...reply.resp.list.entries);
+      hasMore = reply.resp.list.hasMore;
+      offset = reply.resp.list.nextOffset || offset;
+    }
+    return collected;
+  };
+
+  const refreshStorageInfo = async () => {
+    const service = getService();
+    if (!service) return;
+    try {
+      const infoResp = await callRPC(
+        service,
+        Request.create({ storageInfo: {}, target: TARGET_CENTRAL })
+      );
+      if (infoResp.storageInfo) setStorageInfo(infoResp.storageInfo);
+    } catch {
+      /* storage info is best-effort */
+    }
+  };
+
   const loadSettings = async () => {
     const service = getService();
     if (!service) return;
 
     setIsLoading(true);
     setError(null);
+    setStatus(null);
     try {
-      /*
-       * Fetch settings one page at a time. A single response carrying every
-       * setting is slow to stream over the RPC transport and makes the client
-       * time out once there are many entries; paginating keeps each call small
-       * and lets us render progressively as pages arrive.
-       */
-      const collected: SettingEntry[] = [];
-      let offset = 0;
-      for (let page = 0; page < MAX_LIST_PAGES; page++) {
-        const resp = await callRPC(
+      const next: Record<number, SettingEntry[]> = { ...settingsBySource };
+
+      const loadCentral = async () => {
+        next[TARGET_CENTRAL] = await loadCentralPages(service);
+        setSettingsBySource({ ...next });
+      };
+
+      if (target === TARGET_CENTRAL) {
+        await loadCentral();
+      } else if (target === TARGET_ALL) {
+        /* Central via the reliable sync path; peripherals via one broadcast to
+         * discover them, then addressed pagination for any that have more. */
+        await loadCentral();
+        const first = await sendTargeted(
           service,
-          Request.create({ list: { offset, limit: LIST_PAGE_SIZE } })
+          { list: { offset: 0, limit: 0 } },
+          TARGET_ALL,
+          "collect",
+          NOTIFY_COLLECT_MS
         );
-        if (resp.error) {
-          setError(`Device error: ${resp.error.message}`);
-          break;
+        for (const { source, resp } of first) {
+          if (source === TARGET_CENTRAL || !resp.list) continue; // central handled above
+          next[source] = await loadPeripheralPages(
+            service,
+            source,
+            resp.list.hasMore ? resp.list.nextOffset : 0,
+            resp.list.entries
+          );
+          setSettingsBySource({ ...next });
         }
-        if (!resp.list) {
-          break;
+      } else {
+        /* A single addressed peripheral. */
+        const first = await sendTargeted(
+          service,
+          { list: { offset: 0, limit: 0 } },
+          target,
+          "first",
+          NOTIFY_ONE_MS
+        );
+        const reply = first.find((r) => r.source === target) ?? first[0];
+        if (reply?.resp.error) {
+          setError(`Device error: ${reply.resp.error.message}`);
+        } else if (reply?.resp.list) {
+          next[target] = await loadPeripheralPages(
+            service,
+            target,
+            reply.resp.list.hasMore ? reply.resp.list.nextOffset : 0,
+            reply.resp.list.entries
+          );
+          setSettingsBySource({ ...next });
+        } else {
+          setStatus(`No reply from ${targetLabel(target)}.`);
         }
-        collected.push(...resp.list.entries);
-        setSettings([...collected]);
-        if (!resp.list.hasMore || resp.list.entries.length === 0) {
-          break;
-        }
-        offset = resp.list.nextOffset || offset + resp.list.entries.length;
       }
     } catch (e) {
       setError(
@@ -287,25 +535,12 @@ export function SettingsSection() {
       setIsLoading(false);
     }
 
-    /* Refresh storage info whenever we reload settings */
-    const service2 = getService();
-    if (service2) {
-      try {
-        const infoResp = await callRPC(
-          service2,
-          Request.create({ storageInfo: {} })
-        );
-        if (infoResp.storageInfo) {
-          setStorageInfo(infoResp.storageInfo);
-        }
-      } catch {
-        /* storage info is best-effort, ignore errors */
-      }
-    }
+    await refreshStorageInfo();
   };
 
-  const startEdit = (entry: SettingEntry) => {
+  const startEdit = (entry: SettingEntry, source: number) => {
     setEditEntry(entry);
+    setEditSource(source);
     setEditValue(typedValueDisplay(entry));
     setEditError(null);
   };
@@ -314,6 +549,35 @@ export function SettingsSection() {
     setEditEntry(null);
     setEditValue("");
     setEditError(null);
+  };
+
+  /* Reload just the source that was mutated, so the table reflects the change. */
+  const reloadSource = async (source: number) => {
+    const service = getService();
+    if (!service) return;
+    if (source === TARGET_CENTRAL) {
+      const entries = await loadCentralPages(service);
+      setSettingsBySource((prev) => ({ ...prev, [source]: entries }));
+    } else {
+      const first = await sendTargeted(
+        service,
+        { list: { offset: 0, limit: 0 } },
+        source,
+        "first",
+        NOTIFY_ONE_MS
+      );
+      const reply = first.find((r) => r.source === source) ?? first[0];
+      if (reply?.resp.list) {
+        const entries = await loadPeripheralPages(
+          service,
+          source,
+          reply.resp.list.hasMore ? reply.resp.list.nextOffset : 0,
+          reply.resp.list.entries
+        );
+        setSettingsBySource((prev) => ({ ...prev, [source]: entries }));
+      }
+    }
+    await refreshStorageInfo();
   };
 
   const saveEdit = async () => {
@@ -330,17 +594,34 @@ export function SettingsSection() {
     setIsSaving(true);
     setEditError(null);
     try {
-      const resp = await callRPC(
-        service,
-        Request.create({
-          write: { key: editEntry.key, ...typedFields },
-        })
-      );
-      if (resp.error) {
-        setEditError(`Device error: ${resp.error.message}`);
+      const key = editEntry.key;
+      const source = editSource;
+      let deviceError: string | undefined;
+      if (source === TARGET_CENTRAL) {
+        const resp = await callRPC(
+          service,
+          Request.create({
+            write: { key, ...typedFields },
+            target: TARGET_CENTRAL,
+          })
+        );
+        deviceError = resp.error?.message;
+      } else {
+        const replies = await sendTargeted(
+          service,
+          { write: { key, ...typedFields } },
+          source,
+          "first",
+          NOTIFY_ONE_MS
+        );
+        deviceError = replies.find((r) => r.source === source)?.resp.error
+          ?.message;
+      }
+      if (deviceError) {
+        setEditError(`Device error: ${deviceError}`);
       } else {
         cancelEdit();
-        await loadSettings();
+        await reloadSource(source);
       }
     } catch (e) {
       setEditError(
@@ -351,19 +632,37 @@ export function SettingsSection() {
     }
   };
 
-  const deleteSetting = async (key: string) => {
-    if (!confirm(`Delete setting "${key}"?`)) return;
+  const deleteSetting = async (key: string, source: number) => {
+    if (!confirm(`Delete setting "${key}" on ${sourceLabel(source)}?`)) return;
     const service = getService();
     if (!service) return;
 
     setError(null);
     try {
-      const resp = await callRPC(service, Request.create({ delete: { key } }));
-      if (resp.error) {
-        setError(`Delete failed: ${resp.error.message}`);
+      if (source === TARGET_CENTRAL) {
+        const resp = await callRPC(
+          service,
+          Request.create({ delete: { key }, target: TARGET_CENTRAL })
+        );
+        if (resp.error) {
+          setError(`Delete failed: ${resp.error.message}`);
+          return;
+        }
       } else {
-        await loadSettings();
+        const replies = await sendTargeted(
+          service,
+          { delete: { key } },
+          source,
+          "first",
+          NOTIFY_ONE_MS
+        );
+        const err = replies.find((r) => r.source === source)?.resp.error;
+        if (err) {
+          setError(`Delete failed: ${err.message}`);
+          return;
+        }
       }
+      await reloadSource(source);
     } catch (e) {
       setError(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -374,8 +673,21 @@ export function SettingsSection() {
     if (!service) return;
     setIsGcing(true);
     try {
-      await callRPC(service, Request.create({ gc: {} }));
-      await loadSettings();
+      if (target === TARGET_CENTRAL) {
+        await callRPC(
+          service,
+          Request.create({ gc: {}, target: TARGET_CENTRAL })
+        );
+      } else {
+        await sendTargeted(
+          service,
+          { gc: {} },
+          target,
+          target === TARGET_ALL ? "collect" : "first",
+          NOTIFY_ONE_MS
+        );
+      }
+      await refreshStorageInfo();
     } catch (e) {
       setError(`GC failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -385,21 +697,53 @@ export function SettingsSection() {
 
   const handleClearAll = async () => {
     if (
-      !confirm("⚠️ Delete ALL settings on the device? This cannot be undone.")
+      !confirm(
+        `⚠️ Delete ALL settings on ${targetLabel(
+          target
+        )}? This cannot be undone.`
+      )
     )
       return;
     const service = getService();
     if (!service) return;
     setIsClearing(true);
     setError(null);
+    setStatus(null);
     try {
-      const resp = await callRPC(service, Request.create({ clearAll: {} }));
-      if (resp.error) {
-        setError(`Clear all failed: ${resp.error.message}`);
+      if (target === TARGET_CENTRAL) {
+        const resp = await callRPC(
+          service,
+          Request.create({ clearAll: {}, target: TARGET_CENTRAL })
+        );
+        if (resp.error) {
+          setError(`Clear all failed: ${resp.error.message}`);
+          return;
+        }
       } else {
-        setSettings([]);
-        await loadSettings();
+        /* target = all: the central deletes peripherals first, then itself,
+         * and finishes with a completion notification. */
+        setStatus(`Clearing ${targetLabel(target)}…`);
+        await sendTargeted(
+          service,
+          { clearAll: {} },
+          target,
+          target === TARGET_ALL ? "complete" : "first",
+          DELETE_ALL_WAIT_MS
+        );
       }
+      /* Everything on the targeted half/halves is gone: clear the display
+       * optimistically rather than issuing a slow reload. */
+      if (target === TARGET_ALL) {
+        setSettingsBySource({});
+      } else {
+        setSettingsBySource((prev) => {
+          const next = { ...prev };
+          delete next[target];
+          return next;
+        });
+      }
+      setStatus(`Cleared ${targetLabel(target)}.`);
+      await refreshStorageInfo();
     } catch (e) {
       setError(
         `Clear all failed: ${e instanceof Error ? e.message : String(e)}`
@@ -409,7 +753,19 @@ export function SettingsSection() {
     }
   };
 
-  const groups = groupByPrefix(settings);
+  const loadedSources = Object.keys(settingsBySource)
+    .map(Number)
+    .filter((s) => settingsBySource[s] !== undefined)
+    .sort((a, b) => a - b);
+  const hasMultipleSources = loadedSources.length > 1;
+  const visibleSources =
+    displayFilter === "all"
+      ? loadedSources
+      : loadedSources.filter((s) => s === displayFilter);
+  const totalEntries = loadedSources.reduce(
+    (n, s) => n + settingsBySource[s].length,
+    0
+  );
 
   return (
     <section className="card">
@@ -419,11 +775,38 @@ export function SettingsSection() {
         must be unlocked in ZMK Studio first.
       </p>
 
-      {/* ---- Storage capacity bar ---- */}
+      {/* ---- Target selector ---- */}
+      <div className="target-controls">
+        <label htmlFor="target-select">
+          <strong>Target:</strong>
+        </label>{" "}
+        <select
+          id="target-select"
+          value={target}
+          onChange={(e) => setTarget(Number(e.target.value))}
+        >
+          <option value={TARGET_CENTRAL}>Central</option>
+          {Array.from({ length: MAX_PERIPHERALS }, (_, i) => i + 1).map((n) => (
+            <option key={n} value={n}>
+              Peripheral {n}
+            </option>
+          ))}
+          <option value={TARGET_ALL}>All halves</option>
+        </select>{" "}
+        <button
+          className="btn btn-primary"
+          disabled={isLoading}
+          onClick={loadSettings}
+        >
+          {isLoading ? "⏳ Loading..." : "🔄 Load Settings"}
+        </button>
+      </div>
+
+      {/* ---- Storage capacity bar (central) ---- */}
       {storageInfo && storageInfo.totalBytes > 0 && (
         <div className="storage-info">
           <div className="storage-bar-label">
-            Storage: {storageInfo.usedBytes.toLocaleString()} /{" "}
+            Central storage: {storageInfo.usedBytes.toLocaleString()} /{" "}
             {storageInfo.totalBytes.toLocaleString()} bytes used (
             {Math.round((storageInfo.freeBytes / storageInfo.totalBytes) * 100)}
             % free)
@@ -441,7 +824,7 @@ export function SettingsSection() {
               className="btn btn-secondary btn-small"
               onClick={handleGc}
               disabled={isGcing}
-              title="Trigger NVS sector compaction"
+              title={`Trigger NVS sector compaction on ${targetLabel(target)}`}
             >
               {isGcing ? "⏳ Running…" : "🗑️ Run GC"}
             </button>
@@ -449,7 +832,7 @@ export function SettingsSection() {
               className="btn btn-danger btn-small"
               onClick={handleClearAll}
               disabled={isClearing}
-              title="Delete all settings on device (irreversible)"
+              title={`Delete all settings on ${targetLabel(target)} (irreversible)`}
             >
               {isClearing ? "⏳ Clearing…" : "⚠️ Clear All"}
             </button>
@@ -457,13 +840,11 @@ export function SettingsSection() {
         </div>
       )}
 
-      <button
-        className="btn btn-primary"
-        disabled={isLoading}
-        onClick={loadSettings}
-      >
-        {isLoading ? "⏳ Loading..." : "🔄 Load Settings"}
-      </button>
+      {status && (
+        <div className="info-message">
+          <p>{status}</p>
+        </div>
+      )}
 
       {error && (
         <div className="error-message" role="alert">
@@ -471,10 +852,34 @@ export function SettingsSection() {
         </div>
       )}
 
+      {/* ---- Display filter (only when more than one half is loaded) ---- */}
+      {hasMultipleSources && (
+        <div className="display-filter">
+          <label htmlFor="display-filter-select">Show:</label>{" "}
+          <select
+            id="display-filter-select"
+            value={String(displayFilter)}
+            onChange={(e) =>
+              setDisplayFilter(
+                e.target.value === "all" ? "all" : Number(e.target.value)
+              )
+            }
+          >
+            <option value="all">All halves</option>
+            {loadedSources.map((s) => (
+              <option key={s} value={s}>
+                {sourceLabel(s)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* ---- Edit form (placed above the table) ---- */}
       {editEntry && (
         <div className="edit-form">
           <h3>Edit: {editEntry.key}</h3>
+          <p className="edit-source">On {sourceLabel(editSource)}</p>
           <label htmlFor="edit-value">
             Value ({typedValueLabel(editEntry)}):
           </label>
@@ -506,63 +911,75 @@ export function SettingsSection() {
         </div>
       )}
 
-      {settings.length === 0 && !isLoading && !error && (
+      {totalEntries === 0 && !isLoading && !error && (
         <p>
-          No settings loaded. Click &quot;Load Settings&quot; to fetch from
-          device.
+          No settings loaded. Choose a target and click &quot;Load
+          Settings&quot; to fetch from device.
         </p>
       )}
 
-      {/* ---- Settings table grouped by prefix ---- */}
-      {groups.length > 0 && (
-        <div className="settings-groups">
-          {groups.map(([prefix, entries]) => (
-            <div key={prefix} className="settings-group">
-              {prefix !== "" && (
-                <div className="settings-group-header">{prefix}</div>
-              )}
-              <table className="settings-table">
-                <thead>
-                  <tr>
-                    <th>Key</th>
-                    <th>Value</th>
-                    <th>Type</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {entries.map((entry) => (
-                    <tr
-                      key={entry.key}
-                      className={
-                        editEntry?.key === entry.key ? "editing-row" : ""
-                      }
-                    >
-                      <td className="key-cell">{entry.key}</td>
-                      <td className="value-cell">{typedValueDisplay(entry)}</td>
-                      <td>{typedValueLabel(entry)}</td>
-                      <td>
-                        <button
-                          className="btn btn-secondary btn-small"
-                          onClick={() => startEdit(entry)}
+      {/* ---- Settings tables grouped by source, then key prefix ---- */}
+      {visibleSources.map((source) => (
+        <div key={source} className="source-section">
+          {hasMultipleSources && (
+            <h3 className="source-header">{sourceLabel(source)}</h3>
+          )}
+          <div className="settings-groups">
+            {groupByPrefix(settingsBySource[source]).map(
+              ([prefix, entries]) => (
+                <div key={prefix} className="settings-group">
+                  {prefix !== "" && (
+                    <div className="settings-group-header">{prefix}</div>
+                  )}
+                  <table className="settings-table">
+                    <thead>
+                      <tr>
+                        <th>Key</th>
+                        <th>Value</th>
+                        <th>Type</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {entries.map((entry) => (
+                        <tr
+                          key={entry.key}
+                          className={
+                            editEntry?.key === entry.key &&
+                            editSource === source
+                              ? "editing-row"
+                              : ""
+                          }
                         >
-                          ✏️ Edit
-                        </button>{" "}
-                        <button
-                          className="btn btn-danger btn-small"
-                          onClick={() => deleteSetting(entry.key)}
-                        >
-                          🗑️ Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ))}
+                          <td className="key-cell">{entry.key}</td>
+                          <td className="value-cell">
+                            {typedValueDisplay(entry)}
+                          </td>
+                          <td>{typedValueLabel(entry)}</td>
+                          <td>
+                            <button
+                              className="btn btn-secondary btn-small"
+                              onClick={() => startEdit(entry, source)}
+                            >
+                              ✏️ Edit
+                            </button>{" "}
+                            <button
+                              className="btn btn-danger btn-small"
+                              onClick={() => deleteSetting(entry.key, source)}
+                            >
+                              🗑️ Delete
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            )}
+          </div>
         </div>
-      )}
+      ))}
     </section>
   );
 }

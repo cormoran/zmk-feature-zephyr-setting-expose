@@ -215,3 +215,63 @@
   color: #666;
   font-size: 0.85rem;
 }
+
+/* ---- Split targeting controls ---- */
+.target-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.target-controls select,
+.display-filter select {
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+  font-size: 0.95rem;
+}
+
+.display-filter {
+  margin: 0.75rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.source-section {
+  margin-top: 1rem;
+}
+
+.source-header {
+  margin: 0.75rem 0 0.25rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 2px solid #4a9eff;
+  color: #2b6cb0;
+}
+
+.source-badge {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #2d3748;
+  font-size: 0.75rem;
+  vertical-align: middle;
+}
+
+.edit-source {
+  margin: 0 0 0.5rem;
+  color: #555;
+  font-size: 0.85rem;
+}
+
+.info-message {
+  background: #ebf8ff;
+  border: 1px solid #bee3f8;
+  color: #2b6cb0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  margin: 0.5rem 0;
+}
