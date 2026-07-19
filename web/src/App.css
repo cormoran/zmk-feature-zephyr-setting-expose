@@ -275,3 +275,8 @@
   border-radius: 6px;
   margin: 0.5rem 0;
 }
+
+.value-too-large {
+  color: #b7791f;
+  font-style: italic;
+}

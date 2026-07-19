@@ -146,6 +146,17 @@ message ListDone {}
 // peripherals first and its own store last.
 message Complete {}
 
+// A `list` entry whose value was too large to fit one split-relay frame, so it
+// could not be streamed. The key still identifies the setting; `value_size` is
+// the setting's value length in bytes (0 if unknown). This never happens for
+// the central's own settings (its synchronous path stream-encodes) -- only for
+// a peripheral over the size-bounded relay. The web shows the key with a
+// "value too large" marker and still allows deleting it.
+message EntryTooLarge {
+    string key = 1;
+    uint32 value_size = 2;
+}
+
 // Firmware-initiated notification carrying one half's answer to a targeted
 // request. `source` is 0 for the central and the 1-based index for a
 // peripheral; `req_id` echoes the triggering Request. The `event` is type-safe
@@ -162,5 +173,6 @@ message Notification {
         ListDone list_done = 4;
         Response response = 5;
         Complete complete = 6;
+        EntryTooLarge entry_too_large = 7;
     }
 }

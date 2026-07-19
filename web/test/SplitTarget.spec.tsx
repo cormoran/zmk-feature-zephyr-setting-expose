@@ -138,6 +138,41 @@ describe("split target support", () => {
     expect(screen.queryByText("c/one")).not.toBeInTheDocument();
   });
 
+  it("shows a marker for a peripheral entry too large to relay", async () => {
+    const { app, emit } = makeApp();
+    const user = userEvent.setup();
+    render(
+      <ZMKAppProvider value={app}>
+        <SettingsSection />
+      </ZMKAppProvider>
+    );
+
+    await user.selectOptions(screen.getByLabelText(/Target:/i), "1");
+    callRpcMock
+      .mockResolvedValueOnce(rpcReply({ ack: {} }))
+      .mockResolvedValueOnce(rpcReply({ storageInfo: {} }));
+    await user.click(screen.getByRole("button", { name: /Load Settings/i }));
+
+    emit(
+      notif({
+        source: 1,
+        reqId: 1,
+        entryTooLarge: { key: "big/blob", valueSize: 300 },
+      })
+    );
+    emit(notif({ source: 1, reqId: 1, listDone: {} }));
+
+    await waitFor(() =>
+      expect(screen.getByText("big/blob")).toBeInTheDocument()
+    );
+    expect(
+      screen.getByText(/value too large to transfer.*300 bytes/i)
+    ).toBeInTheDocument();
+    // Edit is disabled (value unavailable) but Delete remains usable.
+    expect(screen.getByRole("button", { name: /Edit/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Delete/i })).toBeEnabled();
+  });
+
   it("completes a target=all clear via the completion notification", async () => {
     const { app, emit } = makeApp();
     const user = userEvent.setup();

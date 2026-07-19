@@ -62,16 +62,21 @@ ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(se_relay_reply, SEr, source)
 ZMK_RELAY_EVENT_HANDLE(se_relay_query, SEq, source)
 ZMK_RELAY_EVENT_HANDLE(se_relay_reply, SEr, source)
 
-/* Encode one Notification event into a relay reply and ship it to the central. */
-static void se_relay_send_reply(uint8_t req_id, const zmk_setting_expose_Notification *n) {
+/*
+ * Encode one Notification event into a relay reply and ship it to the central.
+ * Returns false if it does not fit the relay frame (the caller then sends a
+ * smaller marker instead -- see the peripheral stream).
+ */
+static bool se_relay_send_reply(uint8_t req_id, const zmk_setting_expose_Notification *n) {
     struct se_relay_reply reply = {.source = ZMK_RELAY_EVENT_SOURCE_SELF, .req_id = req_id};
     pb_ostream_t os = pb_ostream_from_buffer(reply.data, sizeof(reply.data));
     if (!pb_encode(&os, zmk_setting_expose_Notification_fields, n)) {
-        LOG_ERR("Failed to encode relay notification: %s", PB_GET_ERROR(&os));
-        return;
+        LOG_WRN("Relay notification does not fit the frame: %s", PB_GET_ERROR(&os));
+        return false;
     }
     reply.len = (uint16_t)os.bytes_written;
     raise_se_relay_reply(reply);
+    return true;
 }
 
 /* ---- Peripheral side: answer relayed requests --------------------------- */
@@ -96,6 +101,22 @@ static struct {
     uint32_t offset;
 } pstream;
 
+/* Length in bytes of a setting entry's value, for the entry_too_large marker. */
+static uint32_t entry_value_len(const zmk_setting_expose_SettingEntry *e) {
+    switch (e->which_typed_value) {
+    case zmk_setting_expose_SettingEntry_bytes_value_tag:
+        return e->typed_value.bytes_value.size;
+    case zmk_setting_expose_SettingEntry_string_value_tag:
+        return (uint32_t)strnlen(e->typed_value.string_value, sizeof(e->typed_value.string_value));
+    case zmk_setting_expose_SettingEntry_int32_value_tag:
+        return 4;
+    case zmk_setting_expose_SettingEntry_bool_value_tag:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static void se_relay_stream_work_handler(struct k_work *work);
 static K_WORK_DEFINE(se_relay_stream_work, se_relay_stream_work_handler);
 
@@ -111,7 +132,23 @@ static void se_relay_stream_work_handler(struct k_work *work) {
     int rc = setting_expose_entry_at(pstream.offset, &answer_notif.event.entry);
     if (rc == 1) {
         answer_notif.which_event = zmk_setting_expose_Notification_entry_tag;
-        se_relay_send_reply(pstream.req_id, &answer_notif);
+        if (!se_relay_send_reply(pstream.req_id, &answer_notif)) {
+            /* Value too big for one relay frame: stream a marker carrying just
+             * the key so the client can still show (and delete) the setting. */
+            char key[sizeof(answer_notif.event.entry.key)];
+            strncpy(key, answer_notif.event.entry.key, sizeof(key) - 1);
+            key[sizeof(key) - 1] = '\0';
+            uint32_t vlen = entry_value_len(&answer_notif.event.entry);
+
+            answer_notif =
+                (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
+            answer_notif.req_id = pstream.req_id;
+            answer_notif.which_event = zmk_setting_expose_Notification_entry_too_large_tag;
+            strncpy(answer_notif.event.entry_too_large.key, key,
+                    sizeof(answer_notif.event.entry_too_large.key) - 1);
+            answer_notif.event.entry_too_large.value_size = vlen;
+            se_relay_send_reply(pstream.req_id, &answer_notif);
+        }
         pstream.offset++;
         k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &se_relay_stream_work);
     } else {
@@ -155,7 +192,19 @@ static void se_relay_answer_work_handler(struct k_work *work) {
         answer_notif.req_id = answer_query.req_id;
         answer_notif.which_event = zmk_setting_expose_Notification_response_tag;
         answer_notif.event.response = answer_resp;
-        se_relay_send_reply(answer_query.req_id, &answer_notif);
+        if (!se_relay_send_reply(answer_query.req_id, &answer_notif)) {
+            /* Result (e.g. a large read value) does not fit the relay frame:
+             * report it as an error rather than dropping the reply silently. */
+            answer_notif =
+                (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
+            answer_notif.req_id = answer_query.req_id;
+            answer_notif.which_event = zmk_setting_expose_Notification_response_tag;
+            answer_notif.event.response.which_response_type = zmk_setting_expose_Response_error_tag;
+            snprintf(answer_notif.event.response.response_type.error.message,
+                     sizeof(answer_notif.event.response.response_type.error.message),
+                     "Value too large to relay");
+            se_relay_send_reply(answer_query.req_id, &answer_notif);
+        }
     }
 }
 

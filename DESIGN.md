@@ -54,6 +54,11 @@ This mirrors the proven request→relay→peripheral→reply→central→notify 
   - `Response response` — the single result of any non-`list` op
     (read/write/delete/storage_info/gc/clear_all/error).
   - `Complete complete` — a `TARGET_ALL` delete/clear_all finished.
+  - `EntryTooLarge entry_too_large` — a `list` entry whose value did not fit one
+    relay frame (only reachable over the size-bounded split relay, never on the
+    central's stream-encoded synchronous path). Carries the key + value size so
+    the web shows the setting with a "value too large" marker and still allows
+    deleting it.
 
 ## Firmware structure
 
@@ -91,13 +96,16 @@ This mirrors the proven request→relay→peripheral→reply→central→notify 
 
 ## Buffer sizing
 
-Setting values are up to 256 bytes, so one encoded `Notification` (one
-`SettingEntry`, or a read `Response`) is ~360 bytes. The relay carriers use
-400-byte data buffers and the module defaults
-`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN = 512` (the relay transport chunks a
-frame across the link automatically). Because a `list` streams one entry per
-reply, no per-page buffer is ever allocated.
-`include/zmk/setting_expose/relay.h` `BUILD_ASSERT`s the fit.
+The relay carrier data buffers are **derived** from the relay payload ceiling —
+`SE_RELAY_*_DATA_MAX = CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN − header(4)` — so
+they track whatever the config resolves to instead of being hard-coded. The
+module defaults `DATA_LEN = 512`, which comfortably fits one entry (key + up to
+a 256-byte value + framing); the transport chunks a frame across the link
+automatically, and because a `list` streams one entry per reply no per-page
+buffer is ever allocated. If a value does not fit a (smaller) frame, the
+peripheral streams `entry_too_large` instead of dropping it.
+`include/zmk/setting_expose/relay.h` `BUILD_ASSERT`s the header offset and a
+sane minimum size.
 
 ## Web (`web/src/App.tsx`)
 

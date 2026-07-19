@@ -69,12 +69,12 @@ config ZMK_SETTING_EXPOSE_DELETE_ALL_TIMEOUT_MS
       the central deletes its store and emits the completion notification even
       if a peripheral (e.g. a disconnected half) never replied.
 
-# A single relayed reply carries an encoded Response up to SE_RELAY_REPLY_DATA_MAX
-# bytes (one Read / one-entry List page with a 256-byte value). Raise the
-# reassembled relay payload ceiling to fit it; the relay transport chunks it
-# across the split link automatically. If this default does not take effect for
-# your build, set CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=512 explicitly --
-# include/zmk/setting_expose/relay.h BUILD_ASSERTs it.
+# The relay carrier data buffers are derived from this ceiling (see
+# include/zmk/setting_expose/relay.h), so it alone sizes a relayed frame. 512
+# comfortably fits one setting entry (key + up to a 256-byte value + framing);
+# lowering it saves a little RAM on both halves but makes larger peripheral
+# values relay as an `entry_too_large` marker instead of their value. The relay
+# transport chunks a frame across the split link automatically.
 config ZMK_SPLIT_RELAY_EVENT_DATA_LEN
     default 512
 

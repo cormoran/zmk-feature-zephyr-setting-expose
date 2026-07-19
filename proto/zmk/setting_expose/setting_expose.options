@@ -19,3 +19,5 @@ zmk.setting_expose.WriteRequest.string_value    max_size:256
 zmk.setting_expose.DeleteRequest.key            max_size:80
 
 zmk.setting_expose.ErrorResponse.message        max_size:64
+
+zmk.setting_expose.EntryTooLarge.key            max_size:80

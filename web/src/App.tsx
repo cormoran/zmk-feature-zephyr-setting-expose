@@ -122,9 +122,9 @@ function parseEditValue(
 // ---- Grouping helpers -----------------------------------------------------
 
 /** Group sorted entries by their first path segment (before the first '/') */
-function groupByPrefix(entries: SettingEntry[]): [string, SettingEntry[]][] {
+function groupByPrefix<T extends SettingEntry>(entries: T[]): [string, T[]][] {
   const sorted = [...entries].sort((a, b) => a.key.localeCompare(b.key));
-  const map = new Map<string, SettingEntry[]>();
+  const map = new Map<string, T[]>();
   for (const entry of sorted) {
     const slash = entry.key.indexOf("/");
     const prefix = slash >= 0 ? entry.key.slice(0, slash) : "";
@@ -181,10 +181,17 @@ async function callRPC(
   return Response.decode(responsePayload);
 }
 
+/**
+ * A loaded setting. `tooLargeBytes` is set when a peripheral could not stream
+ * the value over the split relay because it did not fit one frame -- the key is
+ * still known (so it can be shown and deleted), but the value is unavailable.
+ */
+type LoadedEntry = SettingEntry & { tooLargeBytes?: number };
+
 /** Results gathered from the notifications of one targeted request. */
 type TargetedResult = {
   /** Streamed `list` entries, grouped by reply source. */
-  entriesBySource: Record<number, SettingEntry[]>;
+  entriesBySource: Record<number, LoadedEntry[]>;
   /** Single Response per source for non-list ops (read/write/delete/gc/...). */
   responseBySource: Record<number, Response>;
   /** A TARGET_ALL delete/clear_all reported completion. */
@@ -257,7 +264,7 @@ export function SettingsSection() {
   const zmkApp = useContext(ZMKAppContext);
   /* Loaded settings keyed by reply source (0 = central, 1.. = peripheral). */
   const [settingsBySource, setSettingsBySource] = useState<
-    Record<number, SettingEntry[]>
+    Record<number, LoadedEntry[]>
   >({});
   const [target, setTarget] = useState<number>(TARGET_CENTRAL);
   const [displayFilter, setDisplayFilter] = useState<DisplaySource>("all");
@@ -360,6 +367,11 @@ export function SettingsSection() {
           onEvent: (source, n) => {
             if (n.entry) {
               (result.entriesBySource[source] ??= []).push(n.entry);
+            } else if (n.entryTooLarge) {
+              (result.entriesBySource[source] ??= []).push({
+                key: n.entryTooLarge.key,
+                tooLargeBytes: n.entryTooLarge.valueSize,
+              });
             } else if (n.listDone) {
               result.entriesBySource[source] ??= [];
               if (mode === "list" && source === reqTarget) done();
@@ -441,7 +453,7 @@ export function SettingsSection() {
   const loadPeripheralEntries = async (
     service: ZMKCustomSubsystem,
     source: number
-  ): Promise<SettingEntry[] | { error: string } | null> => {
+  ): Promise<LoadedEntry[] | { error: string } | null> => {
     const r = await sendTargeted(
       service,
       { list: { offset: 0, limit: 0 } },
@@ -926,12 +938,34 @@ export function SettingsSection() {
                         >
                           <td className="key-cell">{entry.key}</td>
                           <td className="value-cell">
-                            {typedValueDisplay(entry)}
+                            {entry.tooLargeBytes !== undefined ? (
+                              <span
+                                className="value-too-large"
+                                title="This value is too large to transfer over the split link. It cannot be shown or edited here, but you can still delete the setting."
+                              >
+                                ⚠️ value too large to transfer
+                                {entry.tooLargeBytes > 0
+                                  ? ` (${entry.tooLargeBytes} bytes)`
+                                  : ""}
+                              </span>
+                            ) : (
+                              typedValueDisplay(entry)
+                            )}
                           </td>
-                          <td>{typedValueLabel(entry)}</td>
+                          <td>
+                            {entry.tooLargeBytes !== undefined
+                              ? "—"
+                              : typedValueLabel(entry)}
+                          </td>
                           <td>
                             <button
                               className="btn btn-secondary btn-small"
+                              disabled={entry.tooLargeBytes !== undefined}
+                              title={
+                                entry.tooLargeBytes !== undefined
+                                  ? "Value unavailable (too large to transfer)"
+                                  : undefined
+                              }
                               onClick={() => startEdit(entry, source)}
                             >
                               ✏️ Edit

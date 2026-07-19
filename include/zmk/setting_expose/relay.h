@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <zephyr/kernel.h>
 #include <zmk/event_manager.h>
 #include <zmk/setting_expose/setting_expose.pb.h>
@@ -23,18 +24,30 @@
  * connected Studio client. See src/split/setting_expose_relay.c.
  *
  * The whole struct is memcpy'd into the relay payload, so it must fit
- * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN (asserted by the relay macros). Setting
- * values are up to 256 bytes, so one encoded Notification (one SettingEntry, or
- * a read Response) can be ~360 bytes; the data buffers are sized to hold that
- * plus framing, and the reassembled relay payload ceiling is raised to match
- * (see Kconfig). Both halves run the same little-endian CPU, so the encoded
- * protobuf is portable as-is.
+ * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN. The data buffers are therefore derived
+ * from that ceiling (payload minus the fixed carrier header) rather than
+ * hard-coded, so they automatically track whatever the config resolves to. If a
+ * single Notification does not fit (e.g. a large setting value with a small
+ * DATA_LEN), the peripheral streams an `entry_too_large` marker instead -- the
+ * central's own synchronous path stream-encodes and is not bounded this way.
+ * Both halves run the same little-endian CPU, so the encoded protobuf is
+ * portable as-is.
  */
 
-/* Encoded inner Request (largest: a Write with a 256-byte value + framing). */
-#define SE_RELAY_QUERY_DATA_MAX 400
-/* Encoded inner Notification event (largest: one SettingEntry / a Read + framing). */
-#define SE_RELAY_REPLY_DATA_MAX 400
+/* Relay payload ceiling. Falls back to the module Kconfig default when the
+ * relay is not built (e.g. the native_sim unit test just needs the constants). */
+#if defined(CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN)
+#define SE_RELAY_PAYLOAD_MAX CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN
+#else
+#define SE_RELAY_PAYLOAD_MAX 512
+#endif
+
+/* Fixed __packed carrier header: source(1) + req_id(1) + len(2). */
+#define SE_RELAY_HEADER_BYTES 4
+
+/* Data buffer = payload ceiling minus the carrier header. */
+#define SE_RELAY_QUERY_DATA_MAX (SE_RELAY_PAYLOAD_MAX - SE_RELAY_HEADER_BYTES)
+#define SE_RELAY_REPLY_DATA_MAX (SE_RELAY_PAYLOAD_MAX - SE_RELAY_HEADER_BYTES)
 
 struct se_relay_query {
     uint8_t source; /* ZMK_RELAY_EVENT_SOURCE_SELF on send; sender index+1 on receive */
@@ -51,19 +64,18 @@ struct se_relay_reply {
 } __packed;
 
 /*
- * Both halves must build with a relay payload ceiling large enough for these
- * carriers. The module sets CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=512 as a
- * Kconfig default, but a `default` can lose parse-order to ZMK's own default,
- * so set it explicitly in your config if this assert fires. (ZMK's own
- * __ZMK_RELAY_ASSERT_SIZE also guards this; this one just explains the fix.)
+ * The data buffers are derived from the payload ceiling, so the carriers fit by
+ * construction. These asserts just catch a drifted header size and a DATA_LEN
+ * too small to carry even a minimal keyed entry (below which every value would
+ * relay as `entry_too_large`).
  */
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
+BUILD_ASSERT(offsetof(struct se_relay_reply, data) == SE_RELAY_HEADER_BYTES,
+             "se_relay carrier header size drifted; update SE_RELAY_HEADER_BYTES");
 BUILD_ASSERT(sizeof(struct se_relay_reply) <= CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN,
-             "setting_expose relay replies need CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=512 "
-             "on both split halves");
-BUILD_ASSERT(sizeof(struct se_relay_query) <= CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN,
-             "setting_expose relay queries need CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=512 "
-             "on both split halves");
+             "se_relay carrier does not fit the relay payload ceiling");
+BUILD_ASSERT(SE_RELAY_REPLY_DATA_MAX >= 128,
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too small for setting_expose");
 #endif
 
 ZMK_EVENT_DECLARE(se_relay_query);
