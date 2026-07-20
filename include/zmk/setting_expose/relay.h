@@ -38,18 +38,15 @@
  * portable as-is.
  */
 
-/* RAM staging capacity for one message; also the serialize max_size (= DATA_LEN).
- * Falls back to the Kconfig default when the relay is not built (native_sim). */
+/* RAM staging capacity for one message; also the largest message the serialize
+ * callback will emit. Clamped to 255 because the wire event_data_size is a uint8
+ * -- a larger DATA_LEN just means our messages stop growing at 255, never that a
+ * length is truncated on the wire. Falls back to the Kconfig default when the
+ * relay is not built (native_sim). */
 #if defined(CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN)
-#define SE_RELAY_MAX_DATA CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN
+#define SE_RELAY_MAX_DATA MIN(255, CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN)
 #else
 #define SE_RELAY_MAX_DATA 192
-#endif
-
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
-BUILD_ASSERT(SE_RELAY_MAX_DATA <= 255,
-             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN must be <= 255 (relay event_data_size is a "
-             "uint8); keep it modest so a chunked event fits the BLE TX buffers too");
 #endif
 
 struct se_relay_query {

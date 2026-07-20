@@ -116,18 +116,18 @@ guard on send, stamped to the peripheral index+1 on receive), and `req_id` rides
 inside the encoded Request/Notification; neither is serialized into the carrier.
 The carrier `data[]`/`len` are therefore just a RAM staging area.
 
-`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN` sets both the serialize `max_size` and
-that RAM capacity, and the wire `event_data_size` field is a **uint8 (≤255)**, so
-it must stay under 255 — and modest, so even a full-size message still fits the
-BLE connection's TX buffers when the relay chunks it across the link (a ~240 B
-event was observed to fail with ENOMEM on hardware). The module defaults it to
-**192**; a value that would not fit is streamed as a `too_large` SettingEntry
+`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN` (ZMK's own knob, default 128) bounds the
+largest message the relay will carry. The module does **not** override it — it
+adapts to whatever ZMK or the keyboard sets — and derives `SE_RELAY_MAX_DATA =
+min(255, DATA_LEN)` for its staging buffer: the `255` cap is because the wire
+`event_data_size` field is a **uint8**, so a larger `DATA_LEN` just means the
+module's messages stop growing at 255, never that a length is truncated on the
+wire. A message that would not fit is streamed as a `too_large` SettingEntry
 marker instead of being dropped. Because a `list` streams one entry per reply, no
-per-page buffer is ever allocated. `include/zmk/setting_expose/relay.h`
-`BUILD_ASSERT`s the uint8 (≤255) cap. (An earlier version sent the entire carrier
+per-page buffer is ever allocated. (An earlier version sent the entire carrier
 struct whole — `sizeof`, not the used bytes — which at a 512 `DATA_LEN` made every
-event ~508 B, over the uint8 cap and far too large for BLE; per-message
-serialization fixes that at the source.)
+event ~508 B, over the uint8 cap and far too large for BLE, failing with ENOMEM;
+per-message serialization + the `min(255, …)` clamp fix that at the source.)
 
 ## Web (`web/src/App.tsx`)
 
