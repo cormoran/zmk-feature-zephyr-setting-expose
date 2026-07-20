@@ -80,14 +80,14 @@ struct se_relay_reply {
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
 BUILD_ASSERT(offsetof(struct se_relay_reply, data) == SE_RELAY_HEADER_BYTES,
              "se_relay carrier header size drifted; update SE_RELAY_HEADER_BYTES");
-/* The relay's wire event_data_size is a uint8, so the whole carrier must be
- * <= 255 bytes or the size field silently overflows. */
-BUILD_ASSERT(sizeof(struct se_relay_reply) <= 255 && sizeof(struct se_relay_query) <= 255,
+/* The relay's wire event_data_size is a uint8 and DATA_LEN has no upstream range
+ * check, so guard the DATA_LEN-sized reply carrier against silently overflowing
+ * it. (ZMK's own __ZMK_RELAY_ASSERT_SIZE already asserts each carrier fits
+ * DATA_LEN, which -- via the fixed 100-byte query carrier -- also enforces the
+ * lower bound, so no minimum-size assert is needed here.) */
+BUILD_ASSERT(sizeof(struct se_relay_reply) <= 255,
              "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN too large: relay event_data_size is uint8 "
-             "(<=255); keep it small (~128) to fit BLE TX buffers too");
-/* Enough for a short key + small value; larger values relay as `too_large`. */
-BUILD_ASSERT(SE_RELAY_REPLY_DATA_MAX >= 48,
-             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too small for setting_expose");
+             "(<=255)");
 /* The query carrier must fit a read/delete Request with a full (<=80 char) key. */
 BUILD_ASSERT(SE_RELAY_QUERY_DATA_MAX >= 88,
              "SE_RELAY_QUERY_DATA_MAX too small for a keyed request");
