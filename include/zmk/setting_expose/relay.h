@@ -49,8 +49,18 @@
 /* Fixed __packed carrier header: source(1) + req_id(1) + len(2). */
 #define SE_RELAY_HEADER_BYTES 4
 
-/* Data buffer = event size minus the carrier header. */
-#define SE_RELAY_QUERY_DATA_MAX (SE_RELAY_PAYLOAD_MAX - SE_RELAY_HEADER_BYTES)
+/*
+ * The reply carrier holds a streamed SettingEntry, so it is sized from the
+ * payload ceiling (DATA_LEN). The query carrier only ever holds an encoded
+ * Request -- list/read/delete/gc/clear_all/storage_info, all small; the largest
+ * is a read/delete whose key is <= 80 chars (~90 bytes encoded) -- so it is
+ * sized independently and much smaller, keeping the central->peripheral query
+ * event tiny regardless of DATA_LEN. (ZMK transmits the whole carrier struct, so
+ * a smaller query struct = a smaller query event.) A write with a value too
+ * large to fit here fails to encode and is reported as an error; large writes to
+ * a peripheral are not relayed.
+ */
+#define SE_RELAY_QUERY_DATA_MAX 96
 #define SE_RELAY_REPLY_DATA_MAX (SE_RELAY_PAYLOAD_MAX - SE_RELAY_HEADER_BYTES)
 
 struct se_relay_query {
@@ -78,6 +88,9 @@ BUILD_ASSERT(sizeof(struct se_relay_reply) <= 255 && sizeof(struct se_relay_quer
 /* Enough for a short key + small value; larger values relay as `too_large`. */
 BUILD_ASSERT(SE_RELAY_REPLY_DATA_MAX >= 48,
              "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is too small for setting_expose");
+/* The query carrier must fit a read/delete Request with a full (<=80 char) key. */
+BUILD_ASSERT(SE_RELAY_QUERY_DATA_MAX >= 88,
+             "SE_RELAY_QUERY_DATA_MAX too small for a keyed request");
 #endif
 
 ZMK_EVENT_DECLARE(se_relay_query);
