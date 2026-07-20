@@ -104,18 +104,22 @@ shared by the synchronous and asynchronous delivery paths.
     transaction state is mutated only on the single-threaded low-priority queue,
     so it needs no locking.
 
-## Buffer sizing
+## Buffer sizing (and why it must be small)
 
-The relay carrier data buffers are **derived** from the relay payload ceiling —
-`SE_RELAY_*_DATA_MAX = CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN − header(4)` — so
-they track whatever the config resolves to instead of being hard-coded. The
-module defaults `DATA_LEN = 512`, which comfortably fits one entry (key + up to
-a 256-byte value + framing); the transport chunks a frame across the link
-automatically, and because a `list` streams one entry per reply no per-page
-buffer is ever allocated. If a value does not fit a (smaller) frame, the
-peripheral streams the entry with a `too_large` value instead of dropping it.
-`include/zmk/setting_expose/relay.h` `BUILD_ASSERT`s the header offset and a
-sane minimum size.
+ZMK's relay transmits the **entire carrier struct** (`sizeof`, memcpy'd whole —
+not the `len` bytes actually used) as one event, and the wire `event_data_size`
+field is a **uint8 (≤255)**. So the carrier's fixed size *is* the on-wire event
+size for every relay, even a 6-byte `list` request — and it must stay small:
+under 255, and small enough not to exhaust the BLE connection's TX buffers when
+the relay chunks it across the link (a ~240 B event was observed to fail with
+ENOMEM on hardware). The module therefore defaults
+`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN = 128` (carrier data =
+`DATA_LEN − header(4)`); a value that does not fit is streamed as a `too_large`
+SettingEntry marker instead of being dropped. Because a `list` streams one entry
+per reply, no per-page buffer is ever allocated. `include/zmk/setting_expose/relay.h`
+`BUILD_ASSERT`s the header offset and the uint8 (≤255) cap. (An earlier version
+derived the carrier from a 512 `DATA_LEN`, which made every event ~508 B — over
+the uint8 cap and far too large for BLE; the small default fixes that.)
 
 ## Web (`web/src/App.tsx`)
 

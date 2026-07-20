@@ -69,13 +69,16 @@ config ZMK_SETTING_EXPOSE_DELETE_ALL_TIMEOUT_MS
       the central deletes its store and emits the completion notification even
       if a peripheral (e.g. a disconnected half) never replied.
 
-# The relay carrier data buffers are derived from this ceiling (see
-# include/zmk/setting_expose/relay.h), so it alone sizes a relayed frame. 512
-# comfortably fits one setting entry (key + up to a 256-byte value + framing);
-# lowering it saves a little RAM on both halves but makes larger peripheral
-# values relay as an `entry_too_large` marker instead of their value. The relay
-# transport chunks a frame across the split link automatically.
+# On-wire size of every relayed event. ZMK transmits the WHOLE relay carrier
+# struct (sizeof, not the used bytes) and its wire size field is a uint8, so
+# this value directly sets the event size for every relay -- even a tiny list
+# request -- and MUST stay small: <= 255 (uint8 limit) and small enough not to
+# exhaust the BLE connection TX buffers when chunked across the split link (a
+# ~240 B event was seen to fail with ENOMEM). 128 fits a short key + small value
+# per entry; larger values relay as a `too_large` marker instead. Raise only if
+# your peripherals hold bigger values AND your BLE buffers can take it; lower to
+# shrink events further. include/zmk/setting_expose/relay.h BUILD_ASSERTs the cap.
 config ZMK_SPLIT_RELAY_EVENT_DATA_LEN
-    default 512
+    default 128
 
 endif
