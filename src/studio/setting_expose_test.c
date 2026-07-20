@@ -655,7 +655,7 @@ static bool test_dispatch_roundtrip(void) {
     n.which_event = zmk_setting_expose_Notification_entry_tag;
     n.event.entry = rresp.result.entry;
 
-    uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
+    uint8_t buf[SE_RELAY_MAX_DATA];
     pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
     if (!pb_encode(&os, zmk_setting_expose_Notification_fields, &n)) {
         return false;
@@ -710,7 +710,7 @@ static bool test_entry_at_streaming(void) {
             zmk_setting_expose_Notification n = zmk_setting_expose_Notification_init_zero;
             n.which_event = zmk_setting_expose_Notification_entry_tag;
             n.event.entry = entry;
-            uint8_t buf[SE_RELAY_REPLY_DATA_MAX];
+            uint8_t buf[SE_RELAY_MAX_DATA];
             pb_ostream_t os = pb_ostream_from_buffer(buf, sizeof(buf));
             if (!pb_encode(&os, zmk_setting_expose_Notification_fields, &n)) {
                 return false;

@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <stddef.h>
 #include <zephyr/kernel.h>
 #include <zmk/event_manager.h>
 #include <zmk/setting_expose/setting_expose.pb.h>
@@ -15,83 +14,55 @@
  * Split event-relay carriers for setting_expose.
  *
  * `se_relay_query` travels central -> peripheral (identifier "SEq") and carries
- * an opaque nanopb-encoded inner Request; `se_relay_reply` travels
- * peripheral -> central (identifier "SEr") and carries an encoded inner
- * Notification event. The peripheral answers a non-`list` request with the SAME
- * setting_expose_dispatch the central uses; a `list` is streamed one
- * SettingEntry per reply (plus a final list_done) so no per-page buffer is
- * needed. The central just stamps `source` on each reply and forwards it to the
+ * an encoded inner Request; `se_relay_reply` travels peripheral -> central
+ * (identifier "SEr") and carries an encoded inner Notification. The peripheral
+ * answers a non-`list` request with the SAME setting_expose_dispatch the central
+ * uses; a `list` is streamed one SettingEntry per reply (plus a final
+ * list_done). The central stamps `source` on each reply and forwards it to the
  * connected Studio client. See src/split/setting_expose_relay.c.
  *
- * IMPORTANT sizing note: ZMK's relay transmits the ENTIRE carrier struct
- * (`sizeof(struct ...)`, memcpy'd whole) as one event -- it does NOT trim to the
- * `len` bytes actually used, and the wire `event_data_size` field is a **uint8
- * (max 255)**. So the carrier's fixed size IS the on-wire event size for every
- * relay, even a 6-byte `list` request. It must therefore be kept SMALL: large
- * enough for a typical key+value entry, but small enough to (a) stay well under
- * 255 and (b) not exhaust the BLE connection's TX buffers when the relay chunks
- * it across the split link (a ~240 B event was observed to fail with ENOMEM).
- * Hence DATA_LEN defaults to 128, not the transport's theoretical max. A value
- * that does not fit is streamed as a `too_large` marker instead (the central's
- * own synchronous path stream-encodes and is never bounded this way). Both
- * halves run the same little-endian CPU, so the encoded protobuf is portable.
+ * These carriers use ZMK's serialize/deserialize relay macros
+ * (ZMK_RELAY_EVENT_*_SERIALIZE / ZMK_RELAY_EVENT_HANDLE_DESERIALIZE, cormoran/zmk
+ * PR #36): the serialize callback writes ONLY `data[0..len]` (the encoded
+ * protobuf) to the wire and returns its length, so each relay event is only as
+ * big as the message -- a ~8-byte list request is an ~8-byte event, not a padded
+ * buffer. `data[]` and `len` are therefore just a RAM staging buffer (not sent
+ * whole); `source` is carried by the relay layer itself (loop guard on send,
+ * stamped to the peripheral index+1 on receive) and is not serialized. `req_id`
+ * is not carried here either -- it lives inside the encoded Request/Notification.
+ *
+ * The wire event_data_size is a uint8, so one message is capped at 255 bytes and
+ * at CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN (the serialize max_size + these RAM
+ * buffers). A value that would exceed it streams as a `too_large` SettingEntry
+ * marker instead. Both halves are little-endian, so the encoded protobuf is
+ * portable as-is.
  */
 
-/* On-wire relay event size (= carrier struct size, since ZMK sends it whole).
- * Falls back to the module Kconfig default when the relay is not built (e.g. the
- * native_sim unit test just needs the constants). Keep <= 255 (uint8 limit). */
+/* RAM staging capacity for one message; also the serialize max_size (= DATA_LEN).
+ * Falls back to the Kconfig default when the relay is not built (native_sim). */
 #if defined(CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN)
-#define SE_RELAY_PAYLOAD_MAX CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN
+#define SE_RELAY_MAX_DATA CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN
 #else
-#define SE_RELAY_PAYLOAD_MAX 128
+#define SE_RELAY_MAX_DATA 192
 #endif
-
-/* Fixed __packed carrier header: source(1) + req_id(1) + len(2). */
-#define SE_RELAY_HEADER_BYTES 4
-
-/*
- * The reply carrier holds a streamed SettingEntry, so it is sized from the
- * payload ceiling (DATA_LEN). The query carrier only ever holds an encoded
- * Request -- list/read/delete/gc/clear_all/storage_info, all small; the largest
- * is a read/delete whose key is <= 80 chars (~90 bytes encoded) -- so it is
- * sized independently and much smaller, keeping the central->peripheral query
- * event tiny regardless of DATA_LEN. (ZMK transmits the whole carrier struct, so
- * a smaller query struct = a smaller query event.) A write with a value too
- * large to fit here fails to encode and is reported as an error; large writes to
- * a peripheral are not relayed.
- */
-#define SE_RELAY_QUERY_DATA_MAX 96
-#define SE_RELAY_REPLY_DATA_MAX (SE_RELAY_PAYLOAD_MAX - SE_RELAY_HEADER_BYTES)
-
-struct se_relay_query {
-    uint8_t source; /* ZMK_RELAY_EVENT_SOURCE_SELF on send; sender index+1 on receive */
-    uint8_t req_id; /* echoed back in the reply for client correlation */
-    uint16_t len;   /* bytes of `data` in use */
-    uint8_t data[SE_RELAY_QUERY_DATA_MAX]; /* encoded inner Request */
-} __packed;
-
-struct se_relay_reply {
-    uint8_t source;
-    uint8_t req_id;
-    uint16_t len;
-    uint8_t data[SE_RELAY_REPLY_DATA_MAX]; /* encoded inner Notification event */
-} __packed;
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_RELAY_EVENT)
-BUILD_ASSERT(offsetof(struct se_relay_reply, data) == SE_RELAY_HEADER_BYTES,
-             "se_relay carrier header size drifted; update SE_RELAY_HEADER_BYTES");
-/* The relay's wire event_data_size is a uint8 and DATA_LEN has no upstream range
- * check, so guard the DATA_LEN-sized reply carrier against silently overflowing
- * it. (ZMK's own __ZMK_RELAY_ASSERT_SIZE already asserts each carrier fits
- * DATA_LEN, which -- via the fixed 100-byte query carrier -- also enforces the
- * lower bound, so no minimum-size assert is needed here.) */
-BUILD_ASSERT(sizeof(struct se_relay_reply) <= 255,
-             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN too large: relay event_data_size is uint8 "
-             "(<=255)");
-/* The query carrier must fit a read/delete Request with a full (<=80 char) key. */
-BUILD_ASSERT(SE_RELAY_QUERY_DATA_MAX >= 88,
-             "SE_RELAY_QUERY_DATA_MAX too small for a keyed request");
+BUILD_ASSERT(SE_RELAY_MAX_DATA <= 255,
+             "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN must be <= 255 (relay event_data_size is a "
+             "uint8); keep it modest so a chunked event fits the BLE TX buffers too");
 #endif
+
+struct se_relay_query {
+    uint8_t source; /* relay loop guard / receive stamp (not serialized) */
+    uint16_t len;   /* bytes of `data` in use (the encoded Request) */
+    uint8_t data[SE_RELAY_MAX_DATA];
+};
+
+struct se_relay_reply {
+    uint8_t source; /* stamped to the peripheral index+1 on receive */
+    uint16_t len;   /* bytes of `data` in use (the encoded Notification) */
+    uint8_t data[SE_RELAY_MAX_DATA];
+};
 
 ZMK_EVENT_DECLARE(se_relay_query);
 ZMK_EVENT_DECLARE(se_relay_reply);
@@ -99,11 +70,10 @@ ZMK_EVENT_DECLARE(se_relay_reply);
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 /*
  * Central entry point for a targeted (target != TARGET_CENTRAL) request, called
- * from the Studio RPC handler. Broadcasts the request to the peripheral(s) and
- * sets @p resp to an AckResponse. Per-half results arrive asynchronously as
- * Notifications; the central's OWN store is read via the synchronous path
- * (target 0), so TARGET_ALL only relays to peripherals here. Returns 0 on
- * success, negative errno otherwise.
+ * from the Studio RPC handler. Broadcasts the encoded Request to the
+ * peripheral(s) and sets @p resp to an AckResponse. Per-half results arrive
+ * asynchronously as Notifications; the central's OWN store is read via the
+ * synchronous path (target 0). Returns 0 on success, negative errno otherwise.
  */
 int setting_expose_relay_dispatch(const zmk_setting_expose_Request *req,
                                   zmk_setting_expose_Response *resp);

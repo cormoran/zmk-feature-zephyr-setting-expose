@@ -53,22 +53,60 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 /* ZMK_EVENT_IMPL for both carriers lives in setting_expose_relay_events.c. */
 
 /*
+ * Serialize/deserialize the carriers so ONLY the encoded protobuf (data[0..len])
+ * travels on the wire: each relay event is the size of the message, not the RAM
+ * carrier (cormoran/zmk PR #36). `source` is handled by the relay layer itself
+ * (loop guard on send, stamped on receive) and is not serialized; `req_id` lives
+ * inside the encoded Request/Notification. Each serialize callback is referenced
+ * only by its own role's direction macro (the other role's is empty), hence
+ * __maybe_unused; the deserialize callbacks run on both roles.
+ */
+static __maybe_unused int se_query_serialize(const struct se_relay_query *ev, uint8_t *event_data,
+                                             size_t max_size) {
+    if (ev->len > max_size) {
+        return -EMSGSIZE;
+    }
+    memcpy(event_data, ev->data, ev->len);
+    return ev->len;
+}
+static int se_query_deserialize(struct se_relay_query *ev, const uint8_t *event_data,
+                                size_t event_data_size) {
+    ev->len = (uint16_t)MIN(event_data_size, sizeof(ev->data));
+    memcpy(ev->data, event_data, ev->len);
+    return 0;
+}
+static __maybe_unused int se_reply_serialize(const struct se_relay_reply *ev, uint8_t *event_data,
+                                             size_t max_size) {
+    if (ev->len > max_size) {
+        return -EMSGSIZE;
+    }
+    memcpy(event_data, ev->data, ev->len);
+    return ev->len;
+}
+static int se_reply_deserialize(struct se_relay_reply *ev, const uint8_t *event_data,
+                                size_t event_data_size) {
+    ev->len = (uint16_t)MIN(event_data_size, sizeof(ev->data));
+    memcpy(ev->data, event_data, ev->len);
+    return 0;
+}
+
+/*
  * Wire both carriers in both directions + both HANDLE macros. The direction
  * macros are self-role-gating and the HANDLE macros only fire on a matching
  * identifier, so listing all four is safe on either role.
  */
-ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL(se_relay_query, SEq, source)
-ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(se_relay_reply, SEr, source)
-ZMK_RELAY_EVENT_HANDLE(se_relay_query, SEq, source)
-ZMK_RELAY_EVENT_HANDLE(se_relay_reply, SEr, source)
+ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL_SERIALIZE(se_relay_query, SEq, source, se_query_serialize)
+ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL_SERIALIZE(se_relay_reply, SEr, source, se_reply_serialize)
+ZMK_RELAY_EVENT_HANDLE_DESERIALIZE(se_relay_query, SEq, source, se_query_deserialize)
+ZMK_RELAY_EVENT_HANDLE_DESERIALIZE(se_relay_reply, SEr, source, se_reply_deserialize)
 
 /*
  * Encode one Notification event into a relay reply and ship it to the central.
  * Returns false if it does not fit the relay frame (the caller then sends a
  * smaller marker instead -- see the peripheral stream).
  */
-static bool se_relay_send_reply(uint8_t req_id, const zmk_setting_expose_Notification *n) {
-    struct se_relay_reply reply = {.source = ZMK_RELAY_EVENT_SOURCE_SELF, .req_id = req_id};
+static bool se_relay_send_reply(const zmk_setting_expose_Notification *n) {
+    struct se_relay_reply reply = {.source = ZMK_RELAY_EVENT_SOURCE_SELF};
     pb_ostream_t os = pb_ostream_from_buffer(reply.data, sizeof(reply.data));
     if (!pb_encode(&os, zmk_setting_expose_Notification_fields, n)) {
         LOG_WRN("Relay notification does not fit the frame: %s", PB_GET_ERROR(&os));
@@ -132,7 +170,7 @@ static void se_relay_stream_work_handler(struct k_work *work) {
     int rc = setting_expose_entry_at(pstream.offset, &answer_notif.event.entry);
     if (rc == 1) {
         answer_notif.which_event = zmk_setting_expose_Notification_entry_tag;
-        if (!se_relay_send_reply(pstream.req_id, &answer_notif)) {
+        if (!se_relay_send_reply(&answer_notif)) {
             /* Value too big for one relay frame: re-send the same entry with a
              * `too_large` value so the client can still show (and delete) it. */
             char key[sizeof(answer_notif.event.entry.key)];
@@ -148,14 +186,14 @@ static void se_relay_stream_work_handler(struct k_work *work) {
             answer_notif.event.entry.which_typed_value =
                 zmk_setting_expose_SettingEntry_too_large_tag;
             answer_notif.event.entry.typed_value.too_large = vlen;
-            se_relay_send_reply(pstream.req_id, &answer_notif);
+            se_relay_send_reply(&answer_notif);
         }
         pstream.offset++;
         k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &se_relay_stream_work);
     } else {
         /* Past the last entry (or read error): terminate the stream. */
         answer_notif.which_event = zmk_setting_expose_Notification_list_done_tag;
-        se_relay_send_reply(pstream.req_id, &answer_notif);
+        se_relay_send_reply(&answer_notif);
         pstream.active = false;
     }
 }
@@ -173,7 +211,7 @@ static void se_relay_answer_work_handler(struct k_work *work) {
         if (answer_req.which_op == zmk_setting_expose_Request_list_tag) {
             /* Stream the whole store one entry per cycle. */
             pstream.active = true;
-            pstream.req_id = answer_query.req_id;
+            pstream.req_id = answer_req.req_id;
             pstream.offset = 0;
             k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &se_relay_stream_work);
             continue;
@@ -185,7 +223,7 @@ static void se_relay_answer_work_handler(struct k_work *work) {
         int rc = setting_expose_dispatch(&answer_req, &answer_resp);
 
         answer_notif = (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
-        answer_notif.req_id = answer_query.req_id;
+        answer_notif.req_id = answer_req.req_id;
         if (rc != 0) {
             answer_notif.which_event = zmk_setting_expose_Notification_error_tag;
             snprintf(answer_notif.event.error.message, sizeof(answer_notif.event.error.message),
@@ -212,16 +250,16 @@ static void se_relay_answer_work_handler(struct k_work *work) {
             }
         }
 
-        if (!se_relay_send_reply(answer_query.req_id, &answer_notif)) {
+        if (!se_relay_send_reply(&answer_notif)) {
             /* Result (e.g. a large read value) does not fit the relay frame:
              * report it as an error rather than dropping the reply silently. */
             answer_notif =
                 (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
-            answer_notif.req_id = answer_query.req_id;
+            answer_notif.req_id = answer_req.req_id;
             answer_notif.which_event = zmk_setting_expose_Notification_error_tag;
             snprintf(answer_notif.event.error.message, sizeof(answer_notif.event.error.message),
                      "Value too large to relay");
-            se_relay_send_reply(answer_query.req_id, &answer_notif);
+            se_relay_send_reply(&answer_notif);
         }
     }
 }
@@ -270,11 +308,12 @@ static int se_relay_subsystem_index(void) {
  * setting_expose_relay_dispatch before the query is broadcast; read on the
  * relay work queue when replies arrive. `target` filters which peripheral
  * replies are forwarded (TARGET_ALL forwards all; a specific index forwards
- * only the matching source). `req_id` (client-chosen, low byte) is echoed by
- * peripherals so stale replies from a previous request are dropped.
+ * only the matching source). `req_id` (client-chosen) is echoed by peripherals
+ * inside the notification payload so stale replies from a previous request are
+ * dropped.
  */
 static struct {
-    uint8_t req_id;
+    uint32_t req_id;
     uint32_t target;
 } pending;
 
@@ -286,7 +325,7 @@ static struct {
  */
 static struct {
     bool active;
-    uint8_t req_id;
+    uint32_t req_id;
     uint32_t received;
     uint32_t expected;
     zmk_setting_expose_Request central_req; /* delete/clear_all to run on the central last */
@@ -371,24 +410,28 @@ static void se_relay_notify_work_handler(struct k_work *work) {
         return;
     }
 
-    /* Decode the peripheral's Notification, stamp the real source, forward it. */
+    /* Decode the peripheral's Notification, stamp the real source, forward it.
+     * req_id travels INSIDE the encoded payload (the relay wire carries neither
+     * source nor req_id), so drop stale replies here, after decode. */
     notify_event = (zmk_setting_expose_Notification)zmk_setting_expose_Notification_init_zero;
     pb_istream_t is = pb_istream_from_buffer(notify_reply.data, notify_reply.len);
-    if (pb_decode(&is, zmk_setting_expose_Notification_fields, &notify_event)) {
-        notify_event.source = notify_reply.source;
-        notify_event.req_id = notify_reply.req_id;
-        se_relay_emit();
-    } else {
+    if (!pb_decode(&is, zmk_setting_expose_Notification_fields, &notify_event)) {
         LOG_WRN("Failed to decode relayed notification: %s", PB_GET_ERROR(&is));
-    }
+    } else if (notify_event.req_id != pending.req_id) {
+        LOG_DBG("dropping stale relayed notification (req_id %u != %u)", notify_event.req_id,
+                pending.req_id);
+    } else {
+        notify_event.source = notify_reply.source;
+        se_relay_emit();
 
-    /* Count a delete-all reply and finish once every peripheral has answered.
-     * A delete/clear_all yields exactly one reply per peripheral (a Response),
-     * never a list stream, so counting replies is correct. */
-    if (del_tx.active && notify_reply.req_id == del_tx.req_id) {
-        del_tx.received++;
-        if (del_tx.received >= del_tx.expected) {
-            se_relay_finish_delete();
+        /* Count a delete-all reply and finish once every peripheral has answered.
+         * A delete/clear_all yields exactly one reply per peripheral (a Response),
+         * never a list stream, so counting replies is correct. */
+        if (del_tx.active && notify_event.req_id == del_tx.req_id) {
+            del_tx.received++;
+            if (del_tx.received >= del_tx.expected) {
+                se_relay_finish_delete();
+            }
         }
     }
 
@@ -403,10 +446,9 @@ static int se_relay_on_reply(const zmk_event_t *eh) {
     if (reply == NULL) {
         return ZMK_EV_EVENT_BUBBLE;
     }
-    /* Drop stale replies and replies for a different specific target. */
-    if (reply->req_id != pending.req_id) {
-        return ZMK_EV_EVENT_HANDLED;
-    }
+    /* Drop replies for a different specific target. `source` is stamped by the
+     * relay-receive path; the stale-req_id check happens after decode on the
+     * work queue (req_id is not on the wire). */
     if (pending.target != SETTING_EXPOSE_TARGET_ALL && pending.target != reply->source) {
         return ZMK_EV_EVENT_HANDLED;
     }
@@ -430,14 +472,15 @@ static bool request_is_delete(const zmk_setting_expose_Request *req) {
 
 int setting_expose_relay_dispatch(const zmk_setting_expose_Request *req,
                                   zmk_setting_expose_Response *resp) {
-    uint8_t req_id = (uint8_t)req->req_id;
+    uint32_t req_id = req->req_id;
 
     /* Remember the target so replies can be filtered as they arrive. */
     pending.req_id = req_id;
     pending.target = req->target;
 
-    /* Broadcast the request (the peripheral ignores target). */
-    struct se_relay_query query = {.source = ZMK_RELAY_EVENT_SOURCE_SELF, .req_id = req_id};
+    /* Broadcast the request (the peripheral ignores target). req_id rides inside
+     * the encoded Request, so the carrier needs no separate copy. */
+    struct se_relay_query query = {.source = ZMK_RELAY_EVENT_SOURCE_SELF};
     pb_ostream_t os = pb_ostream_from_buffer(query.data, sizeof(query.data));
     if (!pb_encode(&os, zmk_setting_expose_Request_fields, req)) {
         LOG_WRN("Failed to encode relay query: %s", PB_GET_ERROR(&os));

@@ -69,16 +69,16 @@ config ZMK_SETTING_EXPOSE_DELETE_ALL_TIMEOUT_MS
       the central deletes its store and emits the completion notification even
       if a peripheral (e.g. a disconnected half) never replied.
 
-# On-wire size of every relayed event. ZMK transmits the WHOLE relay carrier
-# struct (sizeof, not the used bytes) and its wire size field is a uint8, so
-# this value directly sets the event size for every relay -- even a tiny list
-# request -- and MUST stay small: <= 255 (uint8 limit) and small enough not to
-# exhaust the BLE connection TX buffers when chunked across the split link (a
-# ~240 B event was seen to fail with ENOMEM). 128 fits a short key + small value
-# per entry; larger values relay as a `too_large` marker instead. Raise only if
-# your peripherals hold bigger values AND your BLE buffers can take it; lower to
-# shrink events further. include/zmk/setting_expose/relay.h BUILD_ASSERTs the cap.
+# Max encoded-message size for a relayed event. The relay carriers serialize
+# themselves (cormoran/zmk PR #36), so only the encoded protobuf's actual bytes
+# go on the wire -- a tiny list request is a tiny event, not a padded buffer.
+# This value is the serialize max_size and the RAM staging buffer per carrier,
+# and the wire size field is a uint8, so it MUST stay <= 255. Keep it modest so
+# even a full-size message still fits the BLE connection TX buffers when chunked
+# across the split link (a ~240 B event was seen to fail with ENOMEM). 192 fits a
+# short key + a reasonable value per entry; a value that would not fit relays as
+# a `too_large` marker instead. include/zmk/setting_expose/relay.h asserts the cap.
 config ZMK_SPLIT_RELAY_EVENT_DATA_LEN
-    default 128
+    default 192
 
 endif
