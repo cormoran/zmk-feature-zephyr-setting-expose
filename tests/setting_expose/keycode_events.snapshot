@@ -12,4 +12,7 @@ PASS: storage_info
 PASS: gc
 PASS: clear_all
 PASS: pagination
+PASS: target_all_fallback
+PASS: dispatch_roundtrip
+PASS: entry_at_streaming
 done

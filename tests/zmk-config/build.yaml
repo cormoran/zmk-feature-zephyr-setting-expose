@@ -13,3 +13,20 @@ include:
     board: xiao_ble//zmk
     shield: tester_xiao
     cmake-args: -DCONFIG_ZMK_STUDIO=n
+
+  # Split event-relay compile coverage. The relay TU
+  # (src/split/setting_expose_relay.c) is self-role-gating, so these two
+  # artifacts prove both the central and peripheral role paths + the
+  # BUILD_ASSERTs compile. tester_xiao is unibody, so the split role is forced
+  # via cmake-args; this is a compile test, not a functional split (that is the
+  # two-XIAO hardware rig).
+  - artifact: setting_expose_board_split_central
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_SETTINGS=y -DCONFIG_ZMK_SETTING_EXPOSE=y -DCONFIG_ZMK_SPLIT=y -DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y -DCONFIG_ZMK_SETTING_EXPOSE_SPLIT=y -DCONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=256
+    snippet: studio-rpc-usb-uart
+
+  - artifact: setting_expose_board_split_peripheral
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    cmake-args: -DCONFIG_SETTINGS=y -DCONFIG_ZMK_SPLIT=y -DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=n -DCONFIG_ZMK_SETTING_EXPOSE_SPLIT=y

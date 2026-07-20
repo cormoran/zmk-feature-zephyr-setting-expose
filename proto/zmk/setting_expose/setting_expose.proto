@@ -2,7 +2,16 @@ syntax = "proto3";
 
 package zmk.setting_expose;
 
-// A single setting key/value pair with type-safe value via oneof.
+// ---- Core value type ------------------------------------------------------
+
+// A setting's key and its typed value. This is the single "key + value" carrier
+// used everywhere: a read result, a write input, and each list entry.
+//
+// `too_large` is a special value type meaning the value could not be delivered
+// because it did not fit one split-relay frame; its byte length is reported so
+// the UI can explain the omission. It is only ever produced by a peripheral over
+// the size-bounded relay -- the central's synchronous path stream-encodes and
+// is never bounded this way.
 message SettingEntry {
     string key = 1;
     oneof typed_value {
@@ -10,100 +19,108 @@ message SettingEntry {
         int32 int32_value = 3;
         bool bool_value = 4;
         string string_value = 5;
+        uint32 too_large = 6;
     }
 }
 
-// List persisted settings.
-//
-// Results are paginated so that a device with many settings does not have to
-// stream one huge response (which is slow over the RPC transport and can make
-// the client time out). The client fetches successive pages until has_more is
-// false.
-message ListRequest {
-    uint32 offset = 1; // index of the first entry to return (0-based)
-    uint32 limit = 2;  // max entries to return; 0 means "all remaining"
-}
+// ---- Shared result pieces -------------------------------------------------
+// Used by both the synchronous Response and the asynchronous Notification.
 
-message ListResponse {
-    repeated SettingEntry entries = 1;
-    uint32 next_offset = 2; // offset to pass in the next ListRequest
-    bool has_more = 3;      // true if more entries remain beyond this page
-}
+message Ok {} // generic success (write / delete / gc / clear_all)
+message Error { string message = 1; }
 
-// Read a single setting by key.
-message ReadRequest { string key = 1; }
-
-message ReadResponse {
-    string key = 1;
-    oneof typed_value {
-        bytes bytes_value = 2;
-        int32 int32_value = 3;
-        bool bool_value = 4;
-        string string_value = 5;
-    }
-}
-
-// Write (persist) a setting value.
-message WriteRequest {
-    string key = 1;
-    oneof typed_value {
-        bytes bytes_value = 2;
-        int32 int32_value = 3;
-        bool bool_value = 4;
-        string string_value = 5;
-    }
-}
-
-message WriteResponse {}
-
-// Delete (reset) a setting by key.
-message DeleteRequest { string key = 1; }
-
-message DeleteResponse {}
-
-// Query the settings storage backend capacity.
-message StorageInfoRequest {}
-
-message StorageInfoResponse {
+message StorageInfo {
     uint32 total_bytes = 1;   // 0 if unknown
     uint32 free_bytes = 2;    // 0 if unknown
     uint32 used_bytes = 3;    // 0 if unknown
     uint32 garbage_bytes = 4; // NVS stale-ATE estimate; 0 if not available
 }
 
-// Trigger garbage collection / compaction of the settings storage backend.
-message GcRequest {}
+// ---- Split targeting ------------------------------------------------------
 
-message GcResponse {}
+// Which half of a split keyboard a Request addresses (Request.target):
+//   TARGET_CENTRAL (0) -- the central only. Handled synchronously; the result
+//                         is returned in this call's Response. Default, and the
+//                         only path on a non-split keyboard.
+//   1 .. 0xFFFE        -- a specific peripheral by 1-based source index.
+//   TARGET_ALL (0xFFFF)-- every half (central + all peripherals).
+// For any target != TARGET_CENTRAL the Response is an Ack and the real per-half
+// results arrive as Notifications. A TARGET_ALL delete/clear_all deletes the
+// peripherals first and the central last, ending with Complete.
+enum Target {
+    TARGET_CENTRAL = 0;
+    TARGET_ALL = 0xFFFF;
+}
 
-// Delete ALL persisted settings. The web UI must show a confirmation dialog.
-message ClearAllRequest {}
+// ---- Requests -------------------------------------------------------------
 
-message ClearAllResponse {}
-
-message ErrorResponse { string message = 1; }
+// List settings. offset/limit paginate the synchronous (central) path; a
+// relayed list ignores them and streams every entry.
+message List {
+    uint32 offset = 1;
+    uint32 limit = 2; // 0 == all remaining
+}
+message Read { string key = 1; }
+message Delete { string key = 1; }
+message GetStorageInfo {}
+message Gc {}
+message ClearAll {}
 
 message Request {
-    oneof request_type {
-        ListRequest list = 1;
-        ReadRequest read = 2;
-        WriteRequest write = 3;
-        DeleteRequest delete = 4;
-        StorageInfoRequest storage_info = 5;
-        GcRequest gc = 6;
-        ClearAllRequest clear_all = 7;
+    uint32 target = 1; // Target; absent/0 == TARGET_CENTRAL
+    uint32 req_id = 2; // echoed in every Notification for this request
+    oneof op {
+        List list = 3;
+        Read read = 4;
+        SettingEntry write = 5; // the setting (key + value) to persist
+        Delete delete = 6;
+        GetStorageInfo storage_info = 7;
+        Gc gc = 8;
+        ClearAll clear_all = 9;
     }
 }
 
+// ---- Synchronous response (target = central, or non-split fallback) --------
+
+// One page of a synchronous list. The relayed list uses streamed Notifications
+// instead, so pagination lives only here.
+message ListPage {
+    repeated SettingEntry entries = 1;
+    uint32 next_offset = 2;
+    bool has_more = 3;
+}
+message Ack {} // a targeted request was accepted; results follow as Notifications
+
 message Response {
-    oneof response_type {
-        ErrorResponse error = 1;
-        ListResponse list = 2;
-        ReadResponse read = 3;
-        WriteResponse write = 4;
-        DeleteResponse delete = 5;
-        StorageInfoResponse storage_info = 6;
-        GcResponse gc = 7;
-        ClearAllResponse clear_all = 8;
+    oneof result {
+        Error error = 1;
+        Ack ack = 2;
+        ListPage list = 3;
+        SettingEntry entry = 4; // read result
+        Ok ok = 5;              // write / delete / gc / clear_all
+        StorageInfo storage_info = 6;
+    }
+}
+
+// ---- Asynchronous notification (one per source, for targeted requests) ----
+
+message ListDone {} // this source finished streaming its list
+message Complete {} // a TARGET_ALL delete/clear_all finished (central deleted last)
+
+// Firmware-initiated result for a targeted request. `source` is 0 for the
+// central and the 1-based index for a peripheral; `req_id` echoes the Request.
+// The `event` shares the same result vocabulary as Response, plus the
+// streaming markers -- a list streams one `entry` per notification (so the
+// peripheral never buffers a page), terminated by `list_done`.
+message Notification {
+    uint32 source = 1;
+    uint32 req_id = 2;
+    oneof event {
+        Error error = 3;
+        SettingEntry entry = 4; // read result, or one streamed list entry
+        ListDone list_done = 5;
+        Ok ok = 6; // write / delete / gc / clear_all
+        StorageInfo storage_info = 7;
+        Complete complete = 8;
     }
 }
